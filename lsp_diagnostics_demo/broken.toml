@@ -1,0 +1,12 @@
+[package]
+name = "broken"
+version = 1.0  # should be a string: "1.0"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"]
+# missing closing brace above
+
+[[items]  # missing closing bracket
+name = "test"
+
+key = value  # unquoted string value

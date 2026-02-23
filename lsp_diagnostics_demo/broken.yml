@@ -1,0 +1,10 @@
+services:
+  web:
+    image: nginx
+     ports:  # bad indentation
+      - "80:80"
+  db:
+    image: postgres
+    environment:
+    - POSTGRES_PASSWORD: secret  # mixing sequence and mapping
+      extra_key: value  # bad indentation

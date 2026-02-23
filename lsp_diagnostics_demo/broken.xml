@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root>
+  <item id="1">
+    <name>First</name>
+    <value>100</value>
+  </item>
+  <item id="2">
+    <name>Second</Name>  <!-- mismatched case in closing tag -->
+    <value>200
+  </item>  <!-- unclosed value tag above -->
+  <unclosed>content
+</root>

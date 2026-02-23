@@ -1,0 +1,14 @@
+body {
+  color: red
+  background-color: blue;  /* missing semicolon above */
+}
+
+.container {
+  width: 100px
+  height: abc;  /* invalid value */
+  margin: ;  /* empty value */
+}
+
+h1 {
+  font-size: 20px;
+/* missing closing brace */

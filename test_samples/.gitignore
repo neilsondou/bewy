@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+.dart_tool/
+packages/
+build/
+dist/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build artifacts
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.class
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Cache
+.cache/
+__pycache__/
+*.pyc

@@ -1,0 +1,9 @@
+name: bewy
+version: 1.0
+items:
+  - one
+   - two  # bad indentation
+  - three
+nested:
+  key1: value1
+    key2: value2  # bad indentation under non-map

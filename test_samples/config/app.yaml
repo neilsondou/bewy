@@ -1,0 +1,43 @@
+app:
+  name: test-samples
+  version: 1.0.0
+  environment: development
+
+server:
+  host: 0.0.0.0
+  port: 8080
+  workers: 4
+  timeout: 30s
+
+database:
+  driver: postgresql
+  host: localhost
+  port: 5432
+  name: app_db
+  username: ${DB_USER}
+  password: ${DB_PASS}
+  pool:
+    min: 2
+    max: 10
+    idle_timeout: 300s
+
+logging:
+  level: info
+  format: json
+  outputs:
+    - type: stdout
+    - type: file
+      path: /var/log/app/app.log
+      rotation:
+        max_size: 100MB
+        max_files: 5
+
+features:
+  cache_enabled: true
+  rate_limit:
+    enabled: true
+    requests_per_minute: 60
+  cors:
+    allowed_origins:
+      - "http://localhost:3000"
+      - "https://app.example.com"

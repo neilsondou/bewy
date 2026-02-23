@@ -1,0 +1,20 @@
+# This file is generated - do not edit
+# generator: npm/10.2.0
+# lockfile version: 3
+
+packages:
+  express:
+    version: 4.18.2
+    resolved: "https://registry.npmjs.org/express/-/express-4.18.2.tgz"
+    integrity: sha512-abc123fake
+    dependencies:
+      accepts: "~1.3.8"
+      body-parser: "1.20.1"
+      cookie: "0.5.0"
+  cors:
+    version: 2.8.5
+    resolved: "https://registry.npmjs.org/cors/-/cors-2.8.5.tgz"
+    integrity: sha512-def456fake
+    dependencies:
+      object-assign: "^4"
+      vary: "^1"

@@ -1,0 +1,13 @@
+$primary-color: #333;
+
+body {
+  color: $primary-color
+  font-size: ;  /* empty value */
+
+  .nested {
+    width: 100px
+    &:hover {
+      color: $undefined-var;  /* undefined variable */
+    }
+  /* missing closing brace for .nested */
+}

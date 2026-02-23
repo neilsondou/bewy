@@ -1,0 +1,75 @@
+# =============================================================================
+# Bewy - Flutter Desktop Code Editor
+# =============================================================================
+
+# ---- OS generated files ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+
+# ---- IDE / Editor ----
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.atom/
+.VSCodeCounter/
+
+# ---- Flutter / Dart / Pub ----
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+**/doc/api/
+**/ios/Flutter/.last_build_id
+
+# ---- Symbolication & obfuscation ----
+app.*.symbols
+app.*.map.json
+
+# ---- Build artifacts ----
+*.exe
+*.dll
+*.so
+*.dylib
+*.obj
+*.o
+*.a
+*.lib
+*.pdb
+*.exp
+*.ilk
+
+# ---- MSIX packaging ----
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+
+# ---- Logs ----
+*.log
+flutter_*.log
+
+# ---- Temp / scratch ----
+temp/
+.ts_fix_temp/
+nul
+
+# ---- Claude Code ----
+.claude/
+
+# ---- Misc ----
+*.class
+*.pyc
+.history
+.svn/
+.swiftpm/
+.buildlog/
+migrate_working_dir/

@@ -1,0 +1,19285 @@
+// ignore_for_file: constant_identifier_names, unnecessary_string_escapes
+
+const little_code = """
+import 'dart:async';
+import 'dart:io';
+import 'dart:math';
+
+import 'code_content.dart';
+import 'scoll.dart';
+import 'controller.dart';
+import 'styling.dart';
+import '../LSP/lsp.dart';
+import '../AI_completion/ai.dart';
+
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:highlight/highlight.dart';
+import 'package:highlight/languages/python.dart';
+import 'package:flutter_highlight/themes/atom-one-dark.dart';
+import 'package:markdown_widget/config/configs.dart';
+import 'package:markdown_widget/widget/all.dart';
+
+part 'shortcuts.dart';
+
+//FIXME: Backspace issue in mobile
+//TODO: Dynamic height for hover bo
+//TODO: set undo stack start index to 1
+//TODO: Preserve text in a bugger
+
+class CodeForge extends StatefulWidget{
+  final CodeForgeController? controller;
+  final Map<String, TextStyle>? editorTheme;
+  final Mode? language;
+  final FocusNode? focusNode;
+  final TextStyle? textStyle;
+  final AiCompletion? aiCompletion;
+  final LspConfig? lspConfig;
+  final EdgeInsets? innerPadding;
+  final ScrollController? verticalScrollController;
+  final ScrollController? horizontalScrollController;
+  final UndoHistoryController? undoHistoryController;
+  final CodeSelectionStyle? selectionStyle;
+  final GutterStyle? gutterStyle;
+  final SuggestionStyle? suggestionStyle;
+  final HoverDetailsStyle? hoverDetailsStyle;
+  final String? filePath;
+  final String? initialText;
+  final bool readOnly;
+  final bool lineWrap;
+  final bool autoFocus;
+  final bool enableFolding;
+  final bool enableGuideLines;
+  final bool enableSuggestions;
+  final bool enableGutterDivider;
+
+  const CodeForge({
+    super.key,
+    this.controller,
+    this.editorTheme,
+    this.language,
+    this.aiCompletion,
+    this.lspConfig,
+    this.filePath,
+    this.initialText,
+    this.focusNode,
+    this.verticalScrollController,
+    this.horizontalScrollController,
+    this.undoHistoryController,
+    this.textStyle,
+    this.innerPadding,
+    this.readOnly = false,
+    this.autoFocus = false,
+    this.lineWrap = false,
+    this.enableFolding = true,
+    this.enableGuideLines = true,
+    this.enableSuggestions = true,
+    this.enableGutterDivider = false,
+    this.selectionStyle,
+    this.gutterStyle,
+    this.suggestionStyle,
+    this.hoverDetailsStyle
+  });
+
+  @override
+  State<CodeForge> createState() => _CodeForgeState();
+}
+
+class _CodeForgeState extends State<CodeForge> {
+  late final ScrollController _vscrollController, _hscrollController;
+  late final CodeForgeController _controller;
+  late final UndoHistoryController _undoController;
+  late final FocusNode _focusNode;
+  late final Map<String, TextStyle> _editorTheme;
+  late final ValueNotifier<CodeContent> _contentNotifier;
+  late final ValueNotifier<bool> _selectionNotifier;
+  late final ValueNotifier<Offset> _offsetNotifier;
+  late final CodeContent _content;
+  late final Mode _language;
+  late final CodeSelectionStyle _selectionStyle;
+  late final GutterStyle _gutterStyle;
+  late final SuggestionStyle _suggestionStyle;
+  late final HoverDetailsStyle _hoverDetailsStyle;
+  final _isMobile = Platform.isAndroid || Platform.isIOS;
+  final _suggScrollController = ScrollController();
+  final _backspaceNotifier = _BackspaceNotifier();
+  final Map<int, String> _heldLineEdits = {}, _originalLineStates = {};
+  final Map<String, String> _cachedResponse = {};
+  final ValueNotifier<String?> _aiNotifier = ValueNotifier(null);
+  final ValueNotifier<Offset?> _aiOffsetNotifier = ValueNotifier(null);
+  final ValueNotifier<List<dynamic>?> _suggestionNotifier = ValueNotifier(null);
+  final ValueNotifier<List<dynamic>?> _hoverNotifier = ValueNotifier(null);
+  final ValueNotifier<List<LspErrors>> _diagnosticsNotifier = ValueNotifier([]);
+  final ValueNotifier<bool> _isHoveringPopup = ValueNotifier(false);
+  List<dynamic> _suggestions = [];
+  TextInputConnection? _connection;
+  int? _holdLocalLine, _holdLocalCaretInLine;
+  int _sugSelIndex = 0;
+  String? _holdLocalLineText;
+  Timer? _keypressTimer, _aiDebounceTimer;
+  bool _isHovered = false, _backspaceHeld = false, _isTyping = false;
+  bool _deleteHeld = false;
+  bool _lspReady = false;
+  TextEditingValue? _previousValue;
+
+  @override
+  void initState() {
+    _controller = widget.controller ?? CodeForgeController();
+    _vscrollController = widget.verticalScrollController ?? ScrollController();
+    _hscrollController = widget.horizontalScrollController ?? ScrollController();
+    _undoController = widget.undoHistoryController ?? UndoHistoryController();
+    _editorTheme = widget.editorTheme ?? atomOneDarkTheme;
+    _selectionStyle = widget.selectionStyle ?? CodeSelectionStyle();
+    _gutterStyle = widget.gutterStyle ?? GutterStyle(
+      lineNumberStyle: widget.textStyle ?? _editorTheme['root'],
+      foldedIconColor: _editorTheme['root']?.color,
+      unfoldedIconColor: _editorTheme['root']?.color,
+      backgroundColor: _editorTheme['root']?.backgroundColor
+    );
+    _suggestionStyle = widget.suggestionStyle ?? SuggestionStyle(
+      elevation: 6,
+      textStyle: ((){
+        TextStyle style = widget.textStyle ?? _editorTheme['root']!;
+        if(style.color == null){
+          style = style.copyWith(
+            color: _editorTheme['root']!.color
+          ); 
+        } 
+        return style;
+      })(),
+      backgroundColor: _editorTheme['root']!.backgroundColor!,
+      focusColor: Colors.blueAccent.withAlpha(50),
+      hoverColor: Colors.grey.withAlpha(15),
+      splashColor: Colors.blueAccent.withAlpha(50),
+      shape: BeveledRectangleBorder(
+        side: BorderSide(
+          color: _editorTheme['root']!.color ?? Colors.grey[400]!,
+          width: 0.2,
+        ),
+      ),
+    );
+
+    _hoverDetailsStyle = widget.hoverDetailsStyle ?? HoverDetailsStyle(
+      shape: BeveledRectangleBorder(
+        side: BorderSide(
+          color: _editorTheme['root']!.color ?? Colors.grey[400]!,
+          width: 0.2,
+        ),
+      ),
+      backgroundColor: _editorTheme['root']!.backgroundColor!,
+      focusColor: Colors.blueAccent.withAlpha(50),
+      hoverColor: Colors.grey.withAlpha(15),
+      splashColor: Colors.blueAccent.withAlpha(50),
+      textStyle: ((){
+        TextStyle style = widget.textStyle ?? _editorTheme['root']!;
+        if(style.color == null){
+          style = style.copyWith(
+            color: _editorTheme['root']!.color
+          ); 
+        } 
+        return style;
+      })(),
+    );
+
+    _language = widget.language ?? python;
+    _focusNode = widget.focusNode ?? FocusNode();
+    _connection = _controller.connection;
+    _content = CodeContent(controller: _controller);
+    _contentNotifier = ValueNotifier(_content);
+    _selectionNotifier = ValueNotifier(false);
+    _offsetNotifier = ValueNotifier(Offset(-1, -1));
+    _controller.manualAiCompletion = getManualAiSuggestion;
+    _controller.readOnly = widget.readOnly;
+
+    if(widget.autoFocus) _focusNode.requestFocus();
+
+    if(widget.lspConfig != null){
+       if(widget.initialText != null){
+        throw ArgumentError(
+          'Cannot provide both filePath and initialText to CodeForge.'
+        );
+      }
+      _controller.text = File(widget.filePath!).readAsStringSync();
+
+      if ((widget.lspConfig!.filePath != widget.filePath) || widget.filePath == null) {
+        throw Exception(
+          'File path in LspConfig does not match the provided filePath in CodeCrafter.',
+        );
+      }
+      
+      (() async {
+        try {
+          if (widget.lspConfig is LspSocketConfig) {
+            await (widget.lspConfig as LspSocketConfig).connect();
+          }
+          await widget.lspConfig!.initialize();
+          await Future.delayed(const Duration(milliseconds: 300));
+          await widget.lspConfig!.openDocument();
+          setState(() {
+            _lspReady = true;
+          });
+        } catch (e) {
+          debugPrint('Error initializing LSP: e');
+        }
+      })();
+
+      widget.lspConfig!.responses.listen((data){
+        if (data['method'] == 'textDocument/publishDiagnostics') {
+          final diagnostics = data['params']['diagnostics'] as List;
+          _diagnosticsNotifier.value.clear();
+          if (diagnostics.isNotEmpty) {
+            final List<LspErrors> errors = [];
+            for (final (item as Map<String, dynamic>) in diagnostics) {
+              errors.add(
+                LspErrors(
+                  severity: (() {
+                    if (item['severity'] == 1 &&
+                        widget.lspConfig!.disableError) {
+                      return 0;
+                    }
+                    if (item['severity'] == 2 &&
+                        widget.lspConfig!.disableWarning) {
+                      return 0;
+                    }
+                    return item['severity'];
+                  })(),
+                  range: item['range'],
+                  message: item['message'],
+                ),
+              );
+            }
+            _diagnosticsNotifier.value = List.from(errors);
+          }
+        }
+      });
+    } else if(widget.initialText != null){
+      _controller.text = widget.initialText!;
+    }
+
+    _focusNode.addListener((){
+      if((_connection == null || !_connection!.attached) && !widget.readOnly){
+        _connection = TextInput.attach(
+          _controller,
+          TextInputConfiguration(
+            readOnly: widget.readOnly,
+            enableDeltaModel: !widget.readOnly,
+            inputType: TextInputType.multiline,
+            inputAction: TextInputAction.newline,
+            autocorrect: false
+        ));
+        _connection!.setEditingState(_controller.value);
+        _connection!.show();
+      }
+      _controller.refresh();
+    });
+
+    _controller.addListener((){
+      final text = _controller.text;
+      final lines = text.split('\n');
+      final line = lines.length - 1;
+      final cursorPosition = _controller.selection.extentOffset;
+      final prefix = _getCurrentWordPrefix(text, cursorPosition);
+      final character = lines.isNotEmpty ? lines.last.length : 0;
+      final currentValue = _controller.value;
+      final prevValue = _previousValue ?? currentValue;
+      _isTyping = false;
+
+      if(
+        currentValue.selection.extentOffset != prevValue.selection.extentOffset &&
+        currentValue.text == prevValue.text
+      ){
+        _suggestionNotifier.value = null;
+      } else if(_isMobile) {
+        _hoverNotifier.value = null;
+      }
+
+      
+
+      if(
+        widget.lspConfig != null && _lspReady &&
+        currentValue.text != prevValue.text
+      ){
+        (() async => await widget.lspConfig!.updateDocument(text))();
+      }
+
+      _contentNotifier.value = CodeContent(
+        controller: _controller,
+        textStyle: widget.textStyle
+      );
+      _aiDebounceTimer?.cancel();
+      
+      if(
+        widget.aiCompletion != null &&
+        _controller.selection.isValid &&
+        widget.aiCompletion!.enableCompletion
+      ){
+        
+        final text = _controller.text;
+        final cursorPosition = _controller.selection.extentOffset.clamp(0, text.length);
+        final textAfterCursor = text.substring(cursorPosition);        
+        if(cursorPosition <= 0) return;
+        bool lineEnd = textAfterCursor.isEmpty ||
+              textAfterCursor.startsWith('\n') ||
+              textAfterCursor.trim().isEmpty;
+        if(!lineEnd) return;
+        final codeToSend = "{text.substring(0, cursorPosition)}<|CURSOR|>{text.substring(cursorPosition)}";
+        if(
+          widget.aiCompletion!.completionType == CompletionType.auto ||
+          widget.aiCompletion!.completionType == CompletionType.mixed
+        ){
+          _aiDebounceTimer = Timer(
+            Duration(milliseconds: widget.aiCompletion!.debounceTime),
+            () async{
+              _aiNotifier.value = await _getCachedResponse(codeToSend);
+            }
+          );
+        }
+      }
+
+      if (currentValue.text.length == prevValue.text.length + 1 &&
+          currentValue.selection.baseOffset == prevValue.selection.baseOffset + 1
+        ) {
+        final insertedChar = currentValue.text.substring(
+          prevValue.selection.baseOffset,
+          currentValue.selection.baseOffset,
+        );
+        _isTyping =
+            insertedChar.isNotEmpty &&
+            RegExp(r'[a-zA-Z]').hasMatch(insertedChar);
+        if(
+          widget.enableSuggestions &&
+          _isTyping &&
+          prefix.isNotEmpty &&
+          _controller.selection.extentOffset > 0
+        ){
+          if(widget.lspConfig == null){
+            final regExp = RegExp(r'\b\w+\b');
+            final List<String> words = regExp
+              .allMatches(text)
+              .map((m) => m.group(0)!)
+              .toList();
+            String currentWord = '';
+            if(text.isNotEmpty){
+              final match = RegExp(r'\w+').firstMatch(text);
+              if (match != null) {
+                currentWord = match.group(0)!;
+              }
+            }
+            _suggestions.clear();
+            for(final i in words){
+              if(!_suggestions.contains(i) && i != currentWord) {
+                _suggestions.add(i);
+              }
+            }
+            if(prefix.isNotEmpty){
+              _suggestions = _suggestions
+                .where((s) => s.startsWith(prefix))
+                .toList();
+            }
+          } else if(_lspReady){
+              final lspConfig = widget.lspConfig!;
+              (() async{
+                final suggestion = await lspConfig.getCompletions(
+                  line,
+                  character
+                ); 
+                _suggestions = suggestion;
+              })();
+          }
+          _sortSuggestions(prefix);
+          final triggerChar = text[cursorPosition - 1];
+          if (!RegExp(r'[a-zA-Z]').hasMatch(triggerChar)) {
+              _suggestionNotifier.value = null;
+              return;
+          }
+          if (mounted && _suggestions.isNotEmpty) {
+            _sugSelIndex = 0;
+            _suggestionNotifier.value = _suggestions;
+          }
+        } else {
+          _suggestionNotifier.value = null; 
+        }
+      }
+      _previousValue = currentValue;
+
+    });
+    
+    WidgetsBinding.instance.addPostFrameCallback((_){
+      if(_vscrollController.hasClients) _vscrollController.jumpTo(0);
+      if(_hscrollController.hasClients) _hscrollController.jumpTo(0);
+      _controller.refresh();
+    });
+    super.initState();
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    _connection?.close();
+    _controller.dispose();
+    _contentNotifier.dispose();
+    _hscrollController.dispose();
+    _vscrollController.dispose();
+    super.dispose();
+  }
+
+  Map<String,int> _lineInfoAtGlobalOffset(int globalOffset) {
+    final lines = _controller.text.split('\n');
+    int accum = 0;
+    for (int i = 0; i < lines.length; i++) {
+      final lineLen = lines[i].length;
+      if (globalOffset >= accum && globalOffset <= accum + lineLen) {
+        return {'line': i, 'lineStart': accum, 'inLine': globalOffset - accum};
+      }
+      accum += lineLen + 1;
+    }
+    final last = max(0, lines.length - 1);
+    final lastStart = accum - (lines.isNotEmpty ? (lines.last.length + 1) : 0);
+    return {'line': last, 'lineStart': lastStart, 'inLine': lines.isNotEmpty ? lines.last.length : 0};
+  }
+  
+  void _commitHeldDeleteToController() {
+    if (!_deleteHeld) return;
+    if (_holdLocalLineText != null && _holdLocalLine != null) {
+      final currentText = _controller.text;
+      final lines = currentText.split('\n');
+      
+      if (_holdLocalLine! < lines.length) {
+        lines[_holdLocalLine!] = _holdLocalLineText!;
+        final newText = lines.join('\n');
+        final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + (_holdLocalCaretInLine ?? 0);
+        
+        _controller.value = _controller.value.copyWith(
+          text: newText,
+          selection: TextSelection.collapsed(offset: newCaret),
+        );
+      }
+    }
+    
+    _backspaceNotifier.clear();
+    _resetDeleteState();
+    _commonF(_controller);
+  }
+  
+  void _resetDeleteState() {
+    _holdLocalLine = null;
+    _holdLocalCaretInLine = null;
+    _holdLocalLineText = null;
+    _deleteHeld = false;
+    _heldLineEdits.clear();
+    _originalLineStates.clear();
+  }
+  
+  void _syncAndMoveToNextLine() {
+    final currentText = _controller.text;
+    final lines = currentText.split('\n');
+    
+    if (_holdLocalLine != null &&
+        _holdLocalLine! < lines.length - 1) {
+      final nextLineIndex = _holdLocalLine! + 1;
+      final currentLineText = _holdLocalLineText ?? lines[_holdLocalLine!];
+      final nextLineText = lines[nextLineIndex];
+  
+      final merged = currentLineText + nextLineText;
+      lines[_holdLocalLine!] = merged;
+      lines.removeAt(nextLineIndex);
+  
+      final newText = lines.join('\n');
+      final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + currentLineText.length;
+  
+      _controller.value = _controller.value.copyWith(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newCaret),
+      );
+  
+      _holdLocalLineText = merged;
+      _holdLocalCaretInLine = currentLineText.length;
+  
+      _backspaceNotifier.clear();
+      _controller.refresh();
+    }
+  }
+  
+  void _commitHeldBackspaceToController() {
+    if (!_backspaceHeld) return;
+    if (_holdLocalLineText != null && _holdLocalLine != null) {
+      final currentText = _controller.text;
+      final lines = currentText.split('\n');
+      
+      if (_holdLocalLine! < lines.length) {
+        lines[_holdLocalLine!] = _holdLocalLineText!;
+        final newText = lines.join('\n');
+        final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + (_holdLocalCaretInLine ?? 0);
+        
+        _controller.value = _controller.value.copyWith(
+          text: newText,
+          selection: TextSelection.collapsed(offset: newCaret),
+        );
+      }
+    }
+    
+    _backspaceNotifier.clear();
+    _resetBackspaceState();
+    _commonF(_controller);
+  }
+
+  void _resetBackspaceState() {
+    _holdLocalLine = null;
+    _holdLocalCaretInLine = null;
+    _holdLocalLineText = null;
+    _backspaceHeld = false;
+    _deleteHeld = false;
+    _heldLineEdits.clear();
+    _originalLineStates.clear();
+  }
+
+  void _syncAndMoveToPreviousLine() {
+    final currentText = _controller.text;
+    final lines = currentText.split('\n');
+    if (_holdLocalLine != null &&
+        _holdLocalLine! > 0 &&
+        _holdLocalLine! < lines.length) {
+      final prevLineIndex = _holdLocalLine! - 1;
+      final currentLineText = _holdLocalLineText ?? lines[_holdLocalLine!];
+
+      final merged = lines[prevLineIndex] + currentLineText;
+      lines[prevLineIndex] = merged;
+      lines.removeAt(_holdLocalLine!);
+
+      final newText = lines.join('\n');
+      final newCaret = _lineStartGlobalOffset(prevLineIndex) + merged.length;
+
+      _controller.value = _controller.value.copyWith(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newCaret),
+      );
+
+      _holdLocalLine = prevLineIndex;
+      _holdLocalLineText = merged;
+      _holdLocalCaretInLine = merged.length;
+
+      _backspaceNotifier.clear();
+      _controller.refresh();
+    }
+  }
+
+  int _lineStartGlobalOffset(int lineIndex) {
+    final lines = _controller.text.split('\n');
+    int acc = 0;
+    for (int i = 0; i < lineIndex && i < lines.length; i++) {
+      acc += lines[i].length + 1;
+    }
+    return acc;
+  }
+
+  Future<String> _getCachedResponse(String codeToSend) async {
+    final String key = codeToSend.hashCode.toString();
+    if (_cachedResponse.containsKey(key)) {
+      return _cachedResponse[key]!;
+    }
+    final String aiResponse = await widget.aiCompletion!.model.completionResponse(codeToSend);
+    _cachedResponse[key] = aiResponse;
+    return aiResponse;
+  }
+
+  void _sortSuggestions(String prefix) {
+    _suggestions.sort((a, b) {
+      final aStartsWith = a is LspCompletion
+          ? a.label.toLowerCase().startsWith(prefix.toLowerCase())
+          : a.toLowerCase().startsWith(prefix.toLowerCase());
+      final bStartsWith = b is LspCompletion
+          ? b.label.toLowerCase().startsWith(prefix.toLowerCase())
+          : b.toLowerCase().startsWith(prefix.toLowerCase());
+      if (aStartsWith && !bStartsWith) return -1;
+      if (!aStartsWith && bStartsWith) return 1;
+
+      return a is LspCompletion ? b.label.compareTo(a.label) : b.compareTo(a);
+    });
+  }
+
+  Future<void> getManualAiSuggestion() async {
+    if (widget.aiCompletion?.completionType == CompletionType.manual ||
+        widget.aiCompletion?.completionType == CompletionType.mixed) {
+      final String text = _controller.text;
+      final int cursorPosition = _controller.selection.extentOffset;
+      final String codeToSend = "{text.substring(0, cursorPosition)}<|CURSOR|>{text.substring(cursorPosition)}";
+      _aiNotifier.value = await _getCachedResponse(codeToSend);
+    }
+  }
+
+  String _getCurrentWordPrefix(String text, int offset) {
+    final safeOffset = offset.clamp(0, text.length);
+    final beforeCursor = text.substring(0, safeOffset);
+    final match = RegExp(r'([a-zA-Z_][a-zA-Z0-9_]*)').firstMatch(beforeCursor);
+    return match?.group(0) ?? '';
+  }
+
+void _scrollSuggestionToIndex(int index) {
+  final itemHeight = (widget.textStyle?.fontSize ?? 14) + 6.5;
+  final scrollOffset = _suggScrollController.offset;
+  final viewHeight = 390.0;
+
+  final itemTop = index * itemHeight;
+  final itemBottom = itemTop + itemHeight;
+
+  if (itemTop < scrollOffset) {
+    _suggScrollController.animateTo(
+      itemTop,
+      duration: Duration(milliseconds: 120),
+      curve: Curves.easeInOut,
+    );
+  } else if (itemBottom > scrollOffset + viewHeight) {
+    _suggScrollController.animateTo(
+      itemBottom - viewHeight,
+      duration: Duration(milliseconds: 120),
+      curve: Curves.easeInOut,
+    );
+  }
+}
+
+  @override
+  Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final screenHeight = MediaQuery.of(context).size.height;
+    return LayoutBuilder(
+      builder: (_, constraints) {
+        return GestureDetector(
+          onTap: _focusNode.requestFocus,
+          child: CallbackShortcuts(
+            bindings: _getShortcuts(_controller, widget.readOnly),
+            child: Stack(
+              children: [
+                RawScrollbar(
+                  thumbColor: _editorTheme['root']!.color!.withAlpha(110),
+                  radius: Radius.circular(20),
+                  controller: _vscrollController,
+                  interactive: !_isMobile,
+                  thumbVisibility: _isHovered,
+                  child: RawScrollbar(
+                    thumbColor: _editorTheme['root']!.color!.withAlpha(110),
+                    radius: Radius.circular(20),
+                    controller: _hscrollController,
+                    thumbVisibility: _isHovered,
+                    interactive: !_isMobile,
+                    child: MouseRegion(
+                      onEnter: (event) => setState(() => _isHovered = true),
+                      onExit: (event) => setState(() => _isHovered = false),
+                      child: UndoHistory<TextEditingValue>(
+                        value: _controller,
+                        controller: _undoController,
+                        focusNode: _focusNode,
+                          onTriggered:(value) {
+                            _controller.value = value;
+                            _controller.refresh();
+                          },
+                        shouldChangeUndoStack: (oldValue, newValue) {
+                          if (!newValue.selection.isValid) {
+                            return false;
+                          }
+
+                          if (oldValue == null && 
+                              newValue.text.isEmpty && 
+                              newValue.selection.extentOffset <= 0) {
+                            return false;
+                          }
+                          
+                          if (oldValue != null && oldValue.text == newValue.text) {
+                            return false;
+                          }
+                
+                          return oldValue == null ||
+                            oldValue.text != newValue.text ||
+                            oldValue.composing != newValue.composing;
+                        },
+                        child: ValueListenableBuilder(
+                          valueListenable: _selectionNotifier,
+                          builder: (_, selectionValue, child) {
+                            return TwoDimensionalScrollable(
+                              verticalDetails: ScrollableDetails.vertical(
+                                controller: _vscrollController,
+                                physics: selectionValue ? NeverScrollableScrollPhysics() : ClampingScrollPhysics()
+                              ),
+                              horizontalDetails: ScrollableDetails.horizontal(
+                                controller: _hscrollController,
+                                physics: selectionValue ? NeverScrollableScrollPhysics() : ClampingScrollPhysics()
+                              ),
+                              viewportBuilder: (_, voffset, hoffset) {
+                                return CustomViewport(
+                                  verticalOffset: voffset,
+                                  horizontalOffset: hoffset,
+                                  mainAxis: Axis.vertical,
+                                  verticalAxisDirection: AxisDirection.down,
+                                  horizontalAxisDirection: AxisDirection.right,
+                                  delegate: TwoDimensionalChildBuilderDelegate(
+                                    maxXIndex: 0,
+                                    maxYIndex: 0,
+                                    builder: (_, vicinity){
+                                      return ValueListenableBuilder(
+                                        valueListenable: _contentNotifier,
+                                        builder: (_, value, child) {
+                                          final codeField = _CodeField(
+                                              context,
+                                              _editorTheme,
+                                              _language,
+                                              _controller,
+                                              _focusNode,
+                                              widget.textStyle,
+                                              widget.innerPadding,
+                                              _vscrollController,
+                                              _hscrollController,
+                                              widget.lineWrap,
+                                              widget.enableFolding,
+                                              widget.readOnly,
+                                              widget.enableGuideLines,
+                                              value,
+                                              _selectionStyle,
+                                              _gutterStyle,
+                                              _selectionNotifier,
+                                              _aiNotifier,
+                                              _aiOffsetNotifier,
+                                              _offsetNotifier,
+                                              _hoverNotifier,
+                                              _diagnosticsNotifier,
+                                              _isHoveringPopup,
+                                              _backspaceNotifier,
+                                              widget.enableGutterDivider
+                                            );
+                                          return SizedBox(
+                                            height: value.totalHeight + (widget.innerPadding?.vertical ?? 0),
+                                            width: widget.lineWrap 
+                                              ? constraints.maxWidth
+                                              : max(
+                                                  value.totalWidth + (widget.innerPadding?.horizontal ?? 0),
+                                                  constraints.maxWidth
+                                                ),
+                                            child:
+                                            KeyboardListener(
+                                              focusNode: _focusNode,
+                                              onKeyEvent: (event) {
+                                                final isShiftPressed = HardwareKeyboard.instance.isShiftPressed;
+                                                final isCtrlPressed = HardwareKeyboard.instance.isControlPressed;
+                                                if(isCtrlPressed) return;
+
+                                                if (event is KeyUpEvent) {
+                                                  if(event.logicalKey == LogicalKeyboardKey.backspace){
+                                                    _commitHeldBackspaceToController();
+                                                  } else if(event.logicalKey == LogicalKeyboardKey.delete){
+                                                    _commitHeldDeleteToController();
+                                                  }
+                                                  return;
+                                                }
+                                                
+                                                if(event is KeyDownEvent){
+                                                  if(event.logicalKey == LogicalKeyboardKey.escape){
+                                                    _suggestionNotifier.value = null;
+                                                    _aiOffsetNotifier.value = null;
+                                                    _offsetNotifier.value = Offset(-1, -1);
+                                                  }
+                                                  
+                                                  if(
+                                                    event.logicalKey == LogicalKeyboardKey.enter &&
+                                                    _controller.isShowingSuggestions &&
+                                                    !_isMobile
+                                                  ){
+                                                    final suggestion = _suggestionNotifier.value?[_sugSelIndex];
+                                                    if(suggestion != null){
+                                                      if(suggestion is String){
+                                                      _controller.insertAtCurrentCursor(suggestion, replaceTypedChar: true);
+                                                      } else if(suggestion is LspCompletion){
+                                                        _controller.insertAtCurrentCursor(suggestion.label, replaceTypedChar: true);
+                                                      }
+                                                    }
+                                                    _suggestionNotifier.value = null;  
+                                                  }
+                                                  
+                                                }
+
+                                                if(event is KeyDownEvent || event is KeyRepeatEvent){
+                                                  final currentSelection = _controller.selection;
+                                                  final currentText = _controller.text;
+                                                  switch (event.logicalKey) {
+                                                    case LogicalKeyboardKey.delete: 
+                                                      if(widget.readOnly) return;
+                                                      _suggestionNotifier.value = null;
+                                                      if(!currentSelection.isValid) return;
+                                                      if(
+                                                        (event is KeyDownEvent && 
+                                                        !currentSelection.isCollapsed) ||
+                                                        (currentText.substring(
+                                                          currentSelection.extentOffset,
+                                                          (currentSelection.extentOffset + 1).clamp(0, currentText.length))
+                                                        ) == '\n'
+                                                      ) {
+                                                        _controller.delete();
+                                                        return;
+                                                      }
+
+                                                      if (!_deleteHeld) {
+                                                        final info = _lineInfoAtGlobalOffset(currentSelection.extentOffset);
+                                                        _holdLocalLine = info['line'];
+                                                        _holdLocalCaretInLine = info['inLine'];
+                                                        final lines = currentText.split('\n');
+                                                        _holdLocalLineText = (0 <= _holdLocalLine! && _holdLocalLine! < lines.length) 
+                                                            ? lines[_holdLocalLine!] 
+                                                            : '';
+                                                        _deleteHeld = true;
+                                                        _heldLineEdits.clear();
+                                                      }
+
+                                                      if (_holdLocalLineText != null) {
+                                                        final caretIn = _holdLocalCaretInLine ?? 0;
+                                                        final lineText = _holdLocalLineText!;
+
+                                                        if (caretIn < lineText.length) {
+                                                          final before = lineText.substring(0, caretIn);
+                                                          final after = lineText.substring(caretIn + 1);
+                                                          _holdLocalLineText = before + after;
+                                                          
+                                                          Offset carretOffset = _content.caretOffset;
+                                                          final tempPainter = TextPainter(
+                                                            text: TextSpan(
+                                                              text: before,
+                                                              style: widget.textStyle ?? _editorTheme['root']
+                                                            ),
+                                                            textDirection: TextDirection.ltr
+                                                          );
+                                                          tempPainter.layout();
+                                                          carretOffset = Offset(tempPainter.width, carretOffset.dy);
+
+                                                          _backspaceNotifier.setEdit(
+                                                            lineIndex: _holdLocalLine!,
+                                                            lineText: _holdLocalLineText!,
+                                                            caretInLine: _holdLocalCaretInLine!,
+                                                            caretOffset: carretOffset
+                                                          );
+                                                        } else if (caretIn >= lineText.length) {
+                                                          final lines = _holdLocalLineText != null
+                                                            ? _holdLocalLineText!.split('\n')
+                                                            : [];
+                                                          if (_holdLocalLine != null && _holdLocalLine! < lines.length - 1) {
+                                                            _syncAndMoveToNextLine();
+                                                          }
+                                                        }
+                                                      }
+                                                      break;
+
+                                                    case LogicalKeyboardKey.backspace:
+                                                      if(widget.readOnly) return;
+                                                      _suggestionNotifier.value = null;
+                                                      if (!currentSelection.isValid) return;
+                                                      if(
+                                                        event is KeyDownEvent &&
+                                                        !currentSelection.isCollapsed
+                                                      ){
+                                                        _controller.backspace();
+                                                        _commonF(_controller);
+                                                        return;
+                                                      }
+                                                      if (!_backspaceHeld) {
+                                                        final info = _lineInfoAtGlobalOffset(currentSelection.extentOffset);
+                                                        _holdLocalLine = info['line'];
+                                                        _holdLocalCaretInLine = info['inLine'];
+                                                        final lines = currentText.split('\n');
+                                                        _holdLocalLineText = (0 <= _holdLocalLine! && _holdLocalLine! < lines.length) 
+                                                            ? lines[_holdLocalLine!] 
+                                                            : '';
+                                                        _backspaceHeld = true;
+                                                        _heldLineEdits.clear();
+                                                      }
+                        
+                                                      if (_holdLocalLineText != null) {
+                                                        final caretIn = _holdLocalCaretInLine ?? 0;
+                        
+                                                        if (caretIn > 0 && caretIn <= _holdLocalLineText!.length) {
+                                                          final before = _holdLocalLineText!.substring(0, caretIn - 1);
+                                                          final after = _holdLocalLineText!.substring(caretIn);
+                                                          _holdLocalLineText = before + after;
+                                                          _holdLocalCaretInLine = caretIn - 1;
+                                                          
+                                                          Offset carretOffset = _content.caretOffset;
+                                                          final tempPainter = TextPainter(
+                                                            text: TextSpan(
+                                                              text: before,
+                                                              style: widget.textStyle ?? _editorTheme['root']
+                                                            ),
+                                                            textDirection: TextDirection.ltr
+                                                          );
+                                                          tempPainter.layout();
+                                                          carretOffset = Offset(tempPainter.width, carretOffset.dy);
+                        
+                                                          _backspaceNotifier.setEdit(
+                                                            lineIndex: _holdLocalLine!,
+                                                            lineText: _holdLocalLineText!,
+                                                            caretInLine: _holdLocalCaretInLine!,
+                                                            caretOffset: carretOffset
+                                                          );
+                                                        } else if (caretIn == 0 && _holdLocalLine! > 0) {
+                                                          _syncAndMoveToPreviousLine();
+                                                        }
+                                                      }
+                                                      break;
+                                                    case LogicalKeyboardKey.arrowUp:
+                                                      if(isShiftPressed) break;
+                                                      if(_suggestionNotifier.value != null){
+                                                        setState(() {
+                                                          _sugSelIndex = (_sugSelIndex - 1) % (_suggestionNotifier.value?.length ?? 1);
+                                                          _scrollSuggestionToIndex(_sugSelIndex);
+                                                        });
+                                                        return;
+                                                      }
+                                                      final textBeforeCursor = currentText.substring(0, currentSelection.extentOffset);
+                                                      final lines = textBeforeCursor.split('\n');
+                                                      if (lines.length > 1) {
+                                                        final currentLineStart = currentSelection.extentOffset - lines.last.length;
+                                                        final previousLineText = lines[lines.length - 2];
+                                                        final newOffset = currentLineStart - previousLineText.length - 1;
+                                                        
+                                                        final targetPosition = min(currentSelection.extentOffset - currentLineStart, previousLineText.length);
+                                                        final newCursorPosition = newOffset + targetPosition;
+                                                        
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: newCursorPosition)
+                                                        );
+                                                      } else if (currentSelection.extentOffset > 0) {
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: 0)
+                                                        );
+                                                      }
+                                                      break;
+                                    
+                                                    case LogicalKeyboardKey.arrowDown:
+                                                      if(isShiftPressed) break;
+                                                      if(_suggestionNotifier.value != null){
+                                                        setState(() {
+                                                          _sugSelIndex = (_sugSelIndex + 1) % (_suggestionNotifier.value?.length ?? 1);
+                                                          _scrollSuggestionToIndex(_sugSelIndex);
+                                                        });
+                                                        return;
+                                                      }
+                                                      final lines = currentText.split('\n');
+                                                      int caret = currentSelection.extentOffset;
+                                                      int charCount = 0;
+                                                      int currentLine = 0;
+                                                      for (int i = 0; i < lines.length; i++) {
+                                                        if (caret <= charCount + lines[i].length) {
+                                                          currentLine = i;
+                                                          break;
+                                                        }
+                                                        charCount += lines[i].length + 1;
+                                                      }
+                                                      final currentLineStart = charCount;
+                                                      final horizontalPosition = caret - currentLineStart;
+                                                      if (currentLine < lines.length - 1) {
+                                                        final nextLineText = lines[currentLine + 1];
+                                                        final targetPosition = min(horizontalPosition, nextLineText.length);
+                                                        final newCursorPosition = currentLineStart + lines[currentLine].length + 1 + targetPosition;
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: min(newCursorPosition, currentText.length))
+                                                        );
+                                                      } else {
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: currentText.length)
+                                                        );
+                                                      }
+                                                      break;
+                                    
+                                                    case LogicalKeyboardKey.arrowLeft:
+                                                      if(isShiftPressed) break;
+                                                      _suggestionNotifier.value = null;
+                                                      if(currentSelection.extentOffset > 0 && currentText.isNotEmpty){
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(
+                                                            offset: currentSelection.extentOffset - 1
+                                                          )
+                                                        );
+                                                      }
+                                                      break;
+                                                      
+                                                    case LogicalKeyboardKey.arrowRight:
+                                                      if(isShiftPressed) break;
+                                                      _suggestionNotifier.value = null;
+                                                      if(_aiNotifier.value != null){
+                                                        _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                                                        _aiNotifier.value = null;
+                                                        _aiOffsetNotifier.value = null;
+                                                        break;
+                                                      }
+                                                      if(currentText.isNotEmpty && currentSelection.extentOffset < currentText.length){
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(
+                                                            offset: currentSelection.extentOffset + 1
+                                                          )
+                                                        );
+                                                      }
+                                                      break;
+
+                                                    case LogicalKeyboardKey.tab:
+                                                      if(_aiNotifier.value != null){
+                                                        _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                                                        _aiNotifier.value = null;
+                                                        _aiOffsetNotifier.value = null;
+                                                      }
+                                                      break;
+                                                  }
+                                                }
+                                                
+                                                if(event.logicalKey != LogicalKeyboardKey.backspace){
+                                                  if(event is KeyDownEvent){
+                                                    _commonF(_controller);
+                                                  } else if(event is KeyRepeatEvent){
+                                                    _keypressTimer?.cancel();
+                                                    Timer(Duration(milliseconds: 5), ()=> _controller.refresh());
+                                                    _keypressTimer = Timer(Duration(milliseconds: 50), () {
+                                                      if(_connection == null || !_connection!.attached){
+                                                        _connection = TextInput.attach(
+                                                          _controller,
+                                                          TextInputConfiguration(
+                                                            enableDeltaModel: true,
+                                                            inputType: TextInputType.multiline,
+                                                            inputAction: TextInputAction.newline
+                                                        ));
+                                                        _connection!.show();
+                                                        _connection!.setEditingState(_controller.value);
+                                                      }
+                                                      else{
+                                                        _connection!.setEditingState(_controller.value);
+                                                      }
+                                                    });
+                                                  }
+                                                }
+                                              },
+                                              child: codeField
+                                            )
+                                          );
+                                        }
+                                      );
+                                    }
+                                  ),
+                                );
+                              }
+                            );
+                          }
+                        ),
+                      )
+                    ),
+                  ),
+                ),
+                ValueListenableBuilder<Offset?>(
+                  valueListenable: _aiOffsetNotifier,
+                  builder: (context, offvalue, child) {
+                    return _isMobile && _aiNotifier.value != null && offvalue != null && _aiNotifier.value!.isNotEmpty ? Positioned(
+                      top: offvalue.dy + (widget.textStyle?.fontSize ?? 14) * _aiNotifier.value!.split('\n').length + 15,
+                      left: offvalue.dx + (_aiNotifier.value!.split('\n')[0].length * (widget.textStyle?.fontSize ?? 14) / 2),
+                      child: Row(
+                        children: [
+                          InkWell(
+                            onTap: (){
+                              if(_aiNotifier.value == null) return;
+                              _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                              _aiNotifier.value = null;
+                              _aiOffsetNotifier.value = null;
+                            },
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: _editorTheme['root']?.backgroundColor,
+                                borderRadius: BorderRadius.all(Radius.circular(8)),
+                                border: BoxBorder.all(
+                                  width: 1.5,
+                                  color: Color(0xff64b5f6)
+                                )
+                              ),
+                              child: Icon(
+                                Icons.check,
+                                color: _editorTheme['root']?.color,
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            width: 30,
+                          ),
+                          InkWell(
+                            onTap: () {
+                              _aiNotifier.value = null;
+                              _aiOffsetNotifier.value = null;
+                            },
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: _editorTheme['root']?.backgroundColor,
+                                borderRadius: BorderRadius.all(Radius.circular(8)),
+                                border: BoxBorder.all(
+                                  width: 1.5,
+                                  color: Colors.red
+                                )
+                              ),
+                              child: Icon(
+                                Icons.close,
+                                color: _editorTheme['root']?.color,
+                              ),
+                            )
+                          )
+                        ],
+                      ),
+                    ) : SizedBox.shrink();
+                  }
+                ),
+                ValueListenableBuilder<Offset>(
+                  valueListenable: _offsetNotifier,
+                  builder: (_, pos, child){
+                    final toolbarStyle = TextStyle(color: Colors.grey[400]);
+                    final shortCutStyle = TextStyle(color: Colors.grey[600]);
+                    void copy() async {
+                      final selection = _controller.selection;
+                      final text = _controller.text;
+                      if (selection.isValid && !selection.isCollapsed) {
+                        final selectedText = text.substring(
+                          selection.start,
+                          selection.end,
+                        );
+                        Clipboard.setData(ClipboardData(text: selectedText));
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void paste() async{
+                      if(widget.readOnly) return;
+                      final data = await Clipboard.getData('text/plain');
+                      final pasteText = data?.text ?? '';
+                      if (pasteText.isNotEmpty) {
+                        final selection = _controller.selection;
+                        final text = _controller.text;
+                        final before = text.substring(0, selection.start);
+                        final after = text.substring(selection.end);
+                        final newText = before + pasteText + after;
+                        final newOffset = before.length + pasteText.length;
+                        _controller.value = _controller.value.copyWith(
+                          text: newText,
+                          selection: TextSelection.collapsed(offset: newOffset),
+                        );
+                        _commonF(_controller);
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void cut(){
+                      if(widget.readOnly) return;
+                      final selection = _controller.selection;
+                      final text = _controller.text;
+                      if (selection.isValid && !selection.isCollapsed) {
+                        final selectedText = text.substring(selection.start, selection.end);
+                        Clipboard.setData(ClipboardData(text: selectedText));
+                        final before = text.substring(0, selection.start);
+                        final after = text.substring(selection.end);
+                        final newText = before + after;
+                        _controller.value = _controller.value.copyWith(
+                          text: newText,
+                          selection: TextSelection.collapsed(offset: before.length),
+                        );
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void selectAll(){
+                      _controller.value = _controller.value.copyWith(
+                        selection: TextSelection(
+                          baseOffset: 0,
+                          extentOffset: _controller.text.length
+                        ),
+                      );
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    return pos.dx < 0 || pos.dy < 0 ? SizedBox.shrink() : _isMobile ? TextSelectionToolbar(
+                      anchorAbove: pos,
+                      anchorBelow: pos,
+                      children: [
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(left: 10),
+                          onPressed: copy,
+                          child: Text("Copy"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(left: 10),
+                          onPressed: paste,
+                          child: Text("Paste"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.zero,
+                          onPressed: cut,
+                          child: Text("Cut"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(right: 10),
+                          onPressed: selectAll,
+                          child: Text("SelectAll"),
+                        ),
+                      ]
+                    ) : Positioned(
+                      top: pos.dy,
+                      left: pos.dx,
+                      width: 200,
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: [
+                          Card(
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadiusGeometry.circular(5),
+                              side: BorderSide(
+                                color: _editorTheme['root']!.color ?? Colors.grey,
+                                width: 0.2
+                              )
+                            ),
+                            color: Color(0xff202020),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                ListTile(
+                                  dense: true,
+                                  onTap: copy,
+                                  title: Text("Copy"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + C"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                  shape: BeveledRectangleBorder(
+                                    borderRadius: BorderRadiusGeometry.vertical(
+                                      top: Radius.circular(3)
+                                    )
+                                  ),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: paste,
+                                  title: Text("Paste"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + V"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: cut,
+                                  title: Text("Cut"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + X"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: selectAll,
+                                  title: Text("SelectAll"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + A"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                  shape: BeveledRectangleBorder(
+                                    borderRadius: BorderRadiusGeometry.vertical(
+                                      bottom: Radius.circular(3)
+                                    )
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+                ),
+                ValueListenableBuilder(
+                  valueListenable: _suggestionNotifier,
+                  builder: (_, sugg, child){
+                    if(sugg == null) {
+                      _sugSelIndex = 0;
+                      _controller.isShowingSuggestions = false;
+                      return SizedBox.shrink();
+                    }
+                    _controller.isShowingSuggestions = true;
+                    return Positioned(
+                      width: screenWidth < 700 ? screenWidth * 0.63 : screenWidth * 0.3,
+                      top: _contentNotifier.value.caretOffset.dy + (widget.textStyle?.fontSize ?? 14) + 10,
+                      left: _contentNotifier.value.caretOffset.dx + 50,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: 400,
+                          maxWidth: 400,
+                          minWidth: 70
+                        ),
+                        child: Card(
+                          shape: _suggestionStyle.shape,
+                          elevation: _suggestionStyle.elevation,
+                          color: _suggestionStyle.backgroundColor,
+                          margin: EdgeInsets.zero,
+                          child: RawScrollbar(
+                            thumbVisibility: true,
+                            thumbColor: _editorTheme['root']!.color!.withAlpha(80),
+                            controller: _suggScrollController,
+                            child: ListView.builder(
+                              itemExtent: (widget.textStyle?.fontSize ?? 14) + 6.5,
+                              controller: _suggScrollController,
+                              padding: EdgeInsets.all(6),
+                              shrinkWrap: true,
+                              itemCount: sugg.length,
+                              itemBuilder: (_, indx){
+                                final item = sugg[indx];
+                                return Container(
+                                  color: _sugSelIndex == indx ? Color(0xff024281) : Colors.transparent,
+                                  child: InkWell(
+                                    canRequestFocus: false,
+                                    hoverColor: _suggestionStyle.hoverColor,
+                                    focusColor: _suggestionStyle.focusColor,
+                                    splashColor: _suggestionStyle.splashColor,
+                                    onTap: () => setState(() {
+                                      _sugSelIndex = indx;
+                                      final text = item is LspCompletion ? item.label : item as String;
+                                      _controller.insertAtCurrentCursor(text, replaceTypedChar: true);
+                                      _suggestionNotifier.value = null;
+                                    }),
+                                    child: Row(
+                                      children: [
+                                        if(item is LspCompletion) ...[
+                                          item.icon,
+                                          const SizedBox(width: 10),
+                                          Text(
+                                            item.label,
+                                            style: _suggestionStyle.textStyle
+                                          )
+                                        ],
+                                        if(item is String) Text(
+                                          item,
+                                          style: _suggestionStyle.textStyle
+                                        )
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          )
+                        ),
+                      ),
+                    );
+                  }
+                ),
+                ValueListenableBuilder(
+                  valueListenable: _hoverNotifier,
+                  builder: (_, hov, c){
+                    if(hov == null || widget.lspConfig == null) return SizedBox.shrink();
+                    final Offset position = hov[0];
+                    final Map<String, int> lineChar = hov[1];
+                    final hoverScrollController = ScrollController();
+                    final width = _isMobile ? screenWidth * 0.63 : screenWidth * 0.3;
+                    final height = _isMobile ? screenHeight * 0.4 : 550.0;
+                    return Positioned(
+                      width: width,
+                      height: height,
+                      top: (screenHeight - position.dy) < 550 ? position.dy - height : position.dy,
+                      left: (screenWidth - position.dx) < width ? position.dx - width : position.dx,
+                      child: MouseRegion(
+                        onEnter: (_) => _isHoveringPopup.value = true,
+                        onExit: (_) => _isHoveringPopup.value = false,
+                        child: Card(
+                          color: _hoverDetailsStyle.backgroundColor,
+                          shape: _hoverDetailsStyle.shape,
+                          child: FutureBuilder<String>(
+                              future: (() async{
+                                final lspConfig = widget.lspConfig;
+                                final line = lineChar['line']!;
+                                final character = lineChar['character']!;
+                                final diagnostic = _diagnosticsNotifier.value.firstWhere(
+                                  (diag) {
+                                    final diagStartLine = diag.range['start']['line'] as int;
+                                    final diagEndLine = diag.range['end']['line'] as int;
+                                    final diagStartChar = diag.range['start']['character'] as int;
+                                    final diagEndChar = diag.range['end']['character'] as int;
+                                    
+                                    if (line < diagStartLine || line > diagEndLine) {
+                                      return false;
+                                    }
+                                    
+                                    if (line == diagStartLine && line == diagEndLine) {
+                                      return character >= diagStartChar && character < diagEndChar;
+                                    } else if (line == diagStartLine) {
+                                      return character >= diagStartChar;
+                                    } else if (line == diagEndLine) {
+                                      return character < diagEndChar;
+                                    } else {
+                                      return true;
+                                    }
+                                  },
+                                  orElse: () => LspErrors(severity: 0, range: {}, message: ''),
+                                );
+                        
+                                if(diagnostic.message.isNotEmpty){
+                                  return diagnostic.message;
+                                }
+                        
+                                if(lspConfig != null){
+                                  return await lspConfig.getHover(line, character);
+                                }
+                        
+                                final hoverDetails = await lspConfig!.getHover(line, character);
+                                return hoverDetails;
+                              })(),
+                              builder: (_, snapShot) {
+                                if (snapShot.hasError) {
+                                  return SizedBox.shrink();
+                                }
+                                final data = snapShot.data;
+                                if (data == null || data.isEmpty) {
+                                  return SizedBox.shrink();
+                                }
+                                if (snapShot.connectionState == ConnectionState.waiting) {
+                                  return Text(
+                                    "Loading...",
+                                    style: _hoverDetailsStyle.textStyle,
+                                  );
+                                }
+                                return Padding(
+                                  padding: const EdgeInsets.all(8.0),
+                                  child: RawScrollbar(
+                                    controller: hoverScrollController,
+                                    thumbVisibility: true,
+                                    thumbColor: _editorTheme['root']!.color!.withAlpha(100),
+                                    child: SingleChildScrollView(
+                                      controller: hoverScrollController,
+                                      child: MarkdownBlock(
+                                        data: data,
+                                        config: MarkdownConfig.darkConfig.copy(
+                                          configs: [
+                                            PConfig(
+                                              textStyle: _hoverDetailsStyle.textStyle
+                                            ),
+                                            PreConfig(
+                                              language: widget.lspConfig?.languageId ?? "dart",
+                                              theme: _editorTheme,
+                                              textStyle: TextStyle(
+                                                fontSize: _hoverDetailsStyle.textStyle.fontSize
+                                              ),
+                                              styleNotMatched: TextStyle(
+                                                color: _editorTheme['root']!.color
+                                              ),
+                                              decoration: BoxDecoration(
+                                                borderRadius: BorderRadius.zero,
+                                                border: Border.all(
+                                                  width: 0.2,
+                                                  color: _editorTheme['root']!.color ?? Colors.grey
+                                                )
+                                              )
+                                            )
+                                          ]
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+                            ),
+                        ),
+                      ),
+                    );
+                  }
+                )
+              ],
+            ),
+          ),
+        );
+      }
+    );
+  }
+}
+
+class _CodeField extends LeafRenderObjectWidget{
+  final BuildContext context;
+  final Map<String, TextStyle> editorTheme;
+  final Mode languade;
+  final CodeForgeController controller;
+  final FocusNode focusNode;
+  final CodeSelectionStyle selectionStyle;
+  final GutterStyle gutterStyle;
+  final TextStyle? textStyle;
+  final EdgeInsets? innerPadding;
+  final ScrollController hscrollController, vscrollController;
+  final bool lineWrap, enableFolding, enableGuideLines, readOnly;
+  final CodeContent? codeContent;
+  final ValueNotifier<bool> selectionNotifier;
+  final ValueNotifier<Offset> offsetNotifier;
+  final ValueNotifier<String?> aiNotifier;
+  final ValueNotifier<Offset?> aiOffsetNotifier;
+  final ValueNotifier<List<dynamic>?> hoverNotifier;
+  final ValueNotifier<List<LspErrors>> diagnosticsNotifier;
+  final ValueNotifier<bool> isHoveringPopup;
+  final _BackspaceNotifier backspaceNotifier;
+  final bool enableGutterDivider;
+
+  const _CodeField(
+    this.context,
+    this.editorTheme,
+    this.languade,
+    this.controller,
+    this.focusNode,
+    this.textStyle,
+    this.innerPadding,
+    this.vscrollController,
+    this.hscrollController,
+    this.lineWrap,
+    this.enableFolding,
+    this.readOnly,
+    this.enableGuideLines,
+    this.codeContent,
+    this.selectionStyle,
+    this.gutterStyle,
+    this.selectionNotifier,
+    this.aiNotifier,
+    this.aiOffsetNotifier,
+    this.offsetNotifier,
+    this.hoverNotifier,
+    this.diagnosticsNotifier,
+    this.isHoveringPopup,
+    this.backspaceNotifier,
+    this.enableGutterDivider
+  );
+
+  @override
+  RenderObject createRenderObject(BuildContext context) {
+    return _CodeFieldRenderer(
+      controller: controller,
+      editorTheme: editorTheme,
+      language: languade,
+      focusNode: focusNode,
+      textStyle: textStyle,
+      innerPadding: innerPadding,
+      vscrollController: vscrollController,
+      hscrollController: hscrollController,
+      lineWrap: lineWrap,
+      enableFolding: enableFolding,
+      enableGuideLines: enableGuideLines,
+      readOnly: readOnly,
+      codeContent: codeContent,
+      selectionStyle: selectionStyle,
+      gutterStyle: gutterStyle,
+      selectionNotifier: selectionNotifier,
+      aiNotifier: aiNotifier,
+      aiOffsetNotifier: aiOffsetNotifier,
+      offsetNotifier: offsetNotifier,
+      hoverNotifier: hoverNotifier,
+      diagnosticsNotifier: diagnosticsNotifier,
+      isHoveringPopup: isHoveringPopup,
+      backspaceNotifier: backspaceNotifier,
+      enableGutterDivider: enableGutterDivider
+    );
+  }
+
+  @override
+  void updateRenderObject(BuildContext context, covariant _CodeFieldRenderer renderObject) {
+    renderObject
+      .._controller = controller
+      ..editorTheme = editorTheme
+      ..language = languade
+      ..textStyle = textStyle
+      ..lineWrap = lineWrap
+      ..enableFolding = enableFolding
+      ..enableGuideLines = enableGuideLines
+      ..codeContent = codeContent
+      ..selectionStyle = selectionStyle
+      ..gutterStyle = gutterStyle
+      ..readOnly = readOnly
+      ..innerPadding = innerPadding;
+  }
+}
+
+class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation{
+  late TextPainter tp;
+  late Mode _language;
+  late double _caretHeight = 0.0;
+  late String _langId;
+  late double _gutterWidth;
+  late final bool _enableGutterDivider;
+  late final Paint _caretPainter;
+  late final CodeSelectionStyle _selectionStyle;
+  late final GutterStyle _gutterStyle;
+  late final ValueNotifier<bool> _selectionNotifier;
+  late final ValueNotifier<String?> _aiNotifier;
+  late final ValueNotifier<Offset?> _aiOffsetNotifier;
+  late final ValueNotifier<Offset> _offsetNotifier;
+  late final ValueNotifier<List<dynamic>?> _hoverNotifier;
+  late final ValueNotifier<List<LspErrors>> _diagnosticsNotifier;
+  late final TextPainter _tempTp;
+  final ValueNotifier<bool> _isHoveringPopup;
+  final List<double> _lineTops = [], _lineHeights = [];
+  final Map<int, List<InlineSpan>> _cachedSpans  =  {};
+  final Map<int, TextPainter> _lineTpCache = {};
+  final Map<int, String> _inFlightEdits = {};
+  final _dtap = DoubleTapGestureRecognizer();
+  final _oneTap = TapGestureRecognizer();
+  final FocusNode _focusNode;
+  final ScrollController _vscrollController, _hscrollController;
+  final bool isMobile = Platform.isAndroid || Platform.isIOS;
+  Offset _currerntPosition = Offset.zero;
+  bool _draggingStartHandle = false, _draggingEndHandle = false, _lineWrap;
+  bool _enableFolding, _enableGuideLines,  _draggingCHandle = false;
+  bool _showCaret = true, _showBubble = false, _readOnly = false;
+  List<String> _lines = [];
+  List<_Pair> _cachedBracketPairs = [];
+  List<FoldRange> _foldRanges = [];
+  List<LspErrors> _diagnostics = [];
+  CodeForgeController _controller;
+  Map<String, TextStyle> _editorTheme;
+  Offset _carretOffset;
+  Timer? _caretTimer;
+  TextStyle? _textStyle;
+  EdgeInsets? _innerPadding;
+  CodeContent? _codeContent;
+  TextSelection? _lastSelection, _lastSelectionForAi;
+  Rect? _startHandleRect, _endHandleRect, _normalHandle;
+  double _gutterPadding = 0.0;
+  String? _aiResponse, _lastProcessedText;
+  TextEditingValue? _prevValue;
+
+  _CodeFieldRenderer({
+    required Map<String, TextStyle> editorTheme,
+    required Mode language,
+    required CodeForgeController controller,
+    required FocusNode focusNode,
+    required TextStyle? textStyle,
+    required EdgeInsets? innerPadding,
+    required ScrollController vscrollController,
+    required ScrollController hscrollController,
+    required bool lineWrap,
+    required bool enableFolding,
+    required bool enableGuideLines,
+    required bool readOnly,
+    required CodeContent? codeContent,
+    required CodeSelectionStyle selectionStyle,
+    required GutterStyle gutterStyle,
+    required ValueNotifier<bool> selectionNotifier,
+    required ValueNotifier<String?> aiNotifier,
+    required ValueNotifier<Offset?> aiOffsetNotifier,
+    required ValueNotifier<Offset> offsetNotifier,
+    required ValueNotifier<List<dynamic>?> hoverNotifier,
+    required ValueNotifier<List<LspErrors>> diagnosticsNotifier,
+    required ValueNotifier<bool> isHoveringPopup,
+    required _BackspaceNotifier backspaceNotifier,
+    required bool enableGutterDivider
+  }):_editorTheme = editorTheme,
+    _controller = controller,
+    _carretOffset = Offset(0, 0),
+    _focusNode = focusNode,
+    _textStyle = textStyle,
+    _innerPadding = innerPadding,
+    _vscrollController = vscrollController,
+    _hscrollController = hscrollController,
+    _lineWrap = lineWrap,
+    _enableFolding = enableFolding,
+    _enableGuideLines = enableGuideLines,
+    _readOnly = readOnly,
+    _codeContent = codeContent,
+    _language = language,
+    _selectionStyle = selectionStyle,
+    _gutterStyle = gutterStyle,
+    _selectionNotifier = selectionNotifier,
+    _aiNotifier = aiNotifier,
+    _aiOffsetNotifier = aiOffsetNotifier,
+    _offsetNotifier = offsetNotifier,
+    _hoverNotifier = hoverNotifier,
+    _diagnosticsNotifier = diagnosticsNotifier,
+    _isHoveringPopup = isHoveringPopup,
+    _enableGutterDivider = enableGutterDivider,
+    _caretPainter = Paint()
+      ..color = selectionStyle.cursorColor ?? editorTheme['root']!.color!
+      ..style = PaintingStyle.fill
+    {
+
+      _tempTp = TextPainter(
+        text: TextSpan(
+          text: "8", style: _textStyle ?? editorTheme['root']
+        ),
+        textDirection: TextDirection.ltr
+      );
+
+      _tempTp.layout();
+
+      _gutterPadding = _tempTp.width * 2;
+      _gutterWidth = _gutterStyle.gutterWidth ?? 0.0;
+
+      _vscrollController.addListener((){
+        _selectionTimer?.cancel();
+        markNeedsPaint();
+      });
+
+      _hscrollController.addListener((){
+        _selectionTimer?.cancel();
+        markNeedsPaint();
+      });
+
+      backspaceNotifier.addListener(() {
+        final idx = backspaceNotifier.lineIndex;
+        final text = backspaceNotifier.lineText;
+        _showCaret = true;
+        if (idx == null) {
+          _inFlightEdits.clear();
+        } else {
+          _inFlightEdits[idx] = text;
+        }
+        _carretOffset = Offset(
+          backspaceNotifier.caretOffset?.dx ?? _carretOffset.dx,
+          _lineTops[backspaceNotifier.lineIndex ?? 0]
+        );
+        if (idx != null) _cachedSpans.remove(idx);
+        markNeedsPaint();
+      });
+
+      _focusNode.addListener(markNeedsPaint);
+
+      String lastText = _controller.text;
+
+      _controller.addListener((){
+        final prevValue = _prevValue;
+        final currValue = _controller.value;
+        final newText = _controller.text;
+        final oldLines = lastText.split('\n');
+        final newLines = newText.split('\n');
+        final changedLines = _findChangedLines(oldLines, newLines);
+        _lines = newLines;
+        _cachedBracketPairs = _computeBracketPairs(newText);
+        
+        for (final i in changedLines) {
+          _cachedSpans.remove(i);
+        }
+        lastText = newText;
+
+        if (prevValue != null && 
+            currValue.text.length != prevValue.text.length &&
+            currValue.selection.isCollapsed) {
+          final cursorLine = _getLineAtOffset(currValue.selection.extentOffset);
+          _autoUnfoldOnEdit(cursorLine);
+        }
+
+        if (prevValue != null &&
+            currValue.selection.start != currValue.selection.end) {
+          final startLine = _getLineAtOffset(currValue.selection.start);
+          final endLine = _getLineAtOffset(currValue.selection.end);
+          _autoUnfoldOnSelection(startLine, endLine);
+        }
+
+        final oldFoldRanges = Map.fromEntries(
+          _foldRanges.map((f) => MapEntry('{f.startIndex}-{f.endIndex}', f))
+        );
+        final newFoldRanges = _getFoldRanges(_lines);
+
+        for (final newFold in newFoldRanges) {
+          final key = '{newFold.startIndex}-{newFold.endIndex}';
+          if (oldFoldRanges.containsKey(key)) {
+            final oldFold = oldFoldRanges[key]!;
+            newFold.isFolded = oldFold.isFolded;
+
+            for (final oldChild in oldFold.originallyFoldedChildren) {
+              final childKey = '{oldChild.startIndex}-{oldChild.endIndex}';
+              final matchingChild = newFoldRanges.firstWhere(
+                (f) => '{f.startIndex}-{f.endIndex}' == childKey,
+                orElse: () => FoldRange(-1, -1)
+              );
+              if (matchingChild.startIndex != -1 && 
+                  matchingChild.startIndex > newFold.startIndex && 
+                  matchingChild.endIndex <= newFold.endIndex) {
+                newFold.addOriginallyFoldedChild(matchingChild);
+              }
+            }
+          }
+        }
+        _foldRanges = newFoldRanges;
+        
+        _gutterWidth = _gutterStyle.gutterWidth ??
+          ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+        _showCaret = true;
+        _caretTimer?.cancel();
+        _caretTimer = Timer.periodic(Duration(milliseconds: 500),(timer) {
+          _showCaret = !_showCaret;
+          markNeedsPaint();
+        });
+
+        final cursorPosition = _controller.selection.extentOffset.clamp(0, _controller.text.length);
+        final textBeforeCursor = _controller.text.substring(0, cursorPosition);
+        final lastTypedChar = textBeforeCursor.isNotEmpty
+          ? textBeforeCursor[textBeforeCursor.length - 1].replaceAll("\n", '')
+          : '';
+          
+        if (_lastProcessedText == newText &&
+            _aiResponse != null &&
+            _aiResponse!.isNotEmpty &&
+            _lastSelectionForAi != _controller.selection)
+          {
+          _aiNotifier.value = null;
+          _aiOffsetNotifier.value = null;
+        }
+        _lastSelectionForAi = _controller.selection;
+
+        
+
+        if (_aiResponse != null && _aiResponse!.isNotEmpty && lastTypedChar.isNotEmpty) {
+          if (_aiResponse![0] == lastTypedChar) {
+            _aiResponse = _aiResponse!.substring(1);
+            if (_aiResponse!.isEmpty) {
+              _aiNotifier.value = null;
+              _aiOffsetNotifier.value = null;
+            }
+          } else {
+            _aiNotifier.value = null;
+            _aiOffsetNotifier.value = null;
+          }
+        }
+        
+        if(
+          currValue.text == prevValue?.text &&
+          currValue.selection.extentOffset != prevValue?.selection.extentOffset
+        ){
+            _showBubble = true;
+            return;
+        } else {
+          _showBubble = false;
+        }
+
+        _prevValue = currValue;
+
+        if (_lastProcessedText == newText) return;
+        _lastProcessedText = newText;
+      });
+
+      _aiNotifier.addListener((){
+        _aiResponse = _aiNotifier.value;
+        _aiOffsetNotifier.value = _codeContent?.caretOffset;
+        markNeedsLayout();
+        markNeedsPaint();
+      });
+
+      _langId = language.hashCode.toString();
+      highlight.registerLanguage(_langId, _language);
+
+      _diagnosticsNotifier.addListener((){
+        _diagnostics = _diagnosticsNotifier.value;
+      });
+  }
+
+  Map<String, TextStyle> get editorTheme => _editorTheme;
+
+  set codeContent(CodeContent? cc){
+    if(cc == null) return;
+    if(cc.hashCode == _codeContent.hashCode) return;
+    
+    _codeContent = cc;
+    tp = _codeContent?.tp ?? TextPainter(textDirection: TextDirection.ltr);
+    final tpWidth = _lineWrap
+        ? size.width - (_innerPadding?.left ?? 0) - (_innerPadding?.right ?? 0)
+        : double.infinity;
+    tp.layout(maxWidth: tpWidth);
+    _carretOffset = cc.caretOffset;
+    _caretHeight = tp.getFullHeightForCaret(
+      TextPosition(offset: cc.currentSelection.extentOffset),
+      Rect.zero
+    );
+
+    if (_lastSelection != _controller.selection) {
+      _lastSelection = _controller.selection;
+      markNeedsPaint();
+      _ensureCaretVisible();
+    }
+  }
+
+  set selectionStyle(CodeSelectionStyle selectionStyle){
+    if(identical(selectionStyle, _selectionStyle)) return;
+    _selectionStyle = selectionStyle;
+    markNeedsPaint();
+  }
+
+  set gutterStyle(GutterStyle gs){
+    if(identical(_gutterStyle, gs)) return;
+    _gutterStyle = _gutterStyle;
+    markNeedsPaint();
+  }
+
+  set enableFolding(bool fl){
+    if(_enableFolding == fl) return;
+    _enableFolding = fl;
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+  
+  set enableGuideLines(bool gl){
+    if(_enableGuideLines == gl) return;
+    _enableGuideLines = gl;
+    markNeedsPaint();
+  }
+
+  set lineWrap(bool lw){
+    if(lw == _lineWrap) return;
+    _lineWrap = lw;
+    markNeedsLayout();
+  }
+
+  set editorTheme(Map<String, TextStyle> et) {
+    if (identical(et, _editorTheme)) return;
+    _editorTheme = et;
+    
+    _tempTp.text = TextSpan(
+      text: "8", 
+      style: _textStyle ?? _editorTheme['root']
+    );
+    _tempTp.layout();
+    
+    _gutterPadding = _tempTp.width * 2;
+    _gutterWidth = _gutterStyle.gutterWidth ?? 
+      ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+    
+    _lineTpCache.clear();
+    _cachedSpans.clear();
+    
+    markNeedsLayout();
+  }
+
+  set language(Mode lang){
+    if(identical(lang, _language)) return;
+    _language = lang;
+    _langId = lang.hashCode.toString();
+    highlight.registerLanguage(_langId, lang);
+    markNeedsPaint();
+  }
+
+  set innerPadding(EdgeInsets? p){
+    if(identical(p, _innerPadding)) return;
+    _innerPadding = p;
+    markNeedsLayout();
+  }
+
+  set readOnly(bool ro) {
+    if (_readOnly == ro) return;
+    _readOnly = ro;
+    
+    // Close text input connection when readonly
+    if (_readOnly && _controller.connection != null) {
+      _controller.connection?.close();
+      _controller.connection = null;
+    }
+    
+    markNeedsPaint();
+  }
+
+  set textStyle(TextStyle? ts){
+      if(identical(ts, _textStyle)) return;
+      _textStyle = ts;
+      
+      _tempTp.text = TextSpan(
+        text: "8", 
+        style: _textStyle ?? _editorTheme['root']
+      );
+      _tempTp.layout();
+      
+      _gutterPadding = _tempTp.width * 2;
+      _gutterWidth = _gutterStyle.gutterWidth ?? 
+        ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+      
+      _lineTpCache.clear();
+      _cachedSpans.clear();
+      
+      markNeedsLayout();
+      markNeedsPaint();
+    }
+
+  List<int> _findChangedLines(List<String> oldLines, List<String> newLines) {
+    final changed = <int>[];
+    final maxLen = max(oldLines.length, newLines.length);
+    for (int i = 0; i < maxLen; i++) {
+      final oldLine = i < oldLines.length ? oldLines[i] : '';
+      final newLine = i < newLines.length ? newLines[i] : '';
+      if (oldLine != newLine) {
+        changed.add(i);
+      }
+    }
+    return changed;
+  }
+
+  List<TextSpan> _convert(
+    List<Node> nodes, [
+    int startOffset = 0,
+  ]) {
+    List<TextSpan> spans = [];
+    int offset = startOffset;
+
+    for (final node in nodes) {
+      if (node.value != null) {
+        final nodeLines = node.value!.split('\n');
+        for (int lineIdx = 0; lineIdx < nodeLines.length; lineIdx++) {
+          final line = nodeLines[lineIdx];
+          if (line.isNotEmpty) {
+            spans.add(TextSpan(
+              text: line,
+              style: editorTheme[node.className ?? ''],
+            ));
+          }
+          if (lineIdx != nodeLines.length - 1) {
+            spans.add(const TextSpan(text: '\n'));
+          }
+        }
+        offset += node.value!.length;
+      } else if (node.children != null) {
+        final inner = _convert(node.children!, offset);
+        spans.add(TextSpan(
+          children: inner,
+          style: editorTheme[node.className ?? ''],
+        ));
+        offset += _textLengthFromSpans(inner);
+      }
+    }
+
+    return spans;
+  }
+
+  int _textLengthFromSpans(List<InlineSpan> spans) {
+    int length = 0;
+    for (final span in spans) {
+      if (span is TextSpan && span.text != null) {
+        length += span.text!.length;
+      }
+      if (span is TextSpan && span.children != null) {
+        length += _textLengthFromSpans(span.children!);
+      }
+    }
+    return length;
+  }
+
+  List<InlineSpan> _applyBracketHighlight(
+    List<InlineSpan> spans,
+    int lineStart,
+    int? b1,
+    int? b2,
+    Set<int> unmatched,
+  ) {
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+
+        if (text != null) {
+          bool needsHighlighting = false;
+          for (int i = 0; i < text.length; i++) {
+            final globalIdx = offset + i;
+            if (unmatched.contains(globalIdx) || globalIdx == b1 || globalIdx == b2) {
+              needsHighlighting = true;
+              break;
+            }
+          }
+
+          if (needsHighlighting) {
+            List<TextSpan> charSpans = [];
+            for (int i = 0; i < text.length; i++) {
+              final globalIdx = offset + i;
+              TextStyle? charStyle = span.style;
+
+              if (unmatched.contains(globalIdx)) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  color: Colors.red,
+                  decoration: TextDecoration.underline,
+                  decorationStyle: TextDecorationStyle.wavy,
+                );
+              } else if (globalIdx == b1 || globalIdx == b2) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  background: Paint()
+                    ..style = PaintingStyle.stroke
+                    ..strokeWidth = 1.2
+                    ..color = editorTheme['root']?.color ?? Colors.white,
+                );
+              }
+
+              charSpans.add(TextSpan(text: text[i], style: charStyle));
+            }
+            result.add(TextSpan(children: charSpans));
+          } else {
+            result.add(span);
+          }
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applyBracketHighlight(children, offset, b1, b2, unmatched);
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += _textLengthFromSpans(childSpans);
+        }
+      }
+    }
+    return result;
+  }
+  
+  List<InlineSpan> _applyDiagnosticsStyling(
+    List<InlineSpan> spans,
+    int lineIndex,
+    int lineStart,
+  ) {
+    if (_diagnostics.isEmpty) return spans;
+    
+    final lineDiagnostics = _diagnostics.where((diag) {
+      final startLine = diag.range['start']['line'] as int;
+      final endLine = diag.range['end']['line'] as int;
+      return lineIndex >= startLine && lineIndex <= endLine;
+    }).toList();
+    
+    if (lineDiagnostics.isEmpty) return spans;
+    
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+    
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+        
+        if (text != null) {
+          int spanStart = offset;
+          int spanEnd = offset + text.length;
+          
+          bool hasDiagnostic = false;
+          Color? diagnosticColor;
+          
+          for (final diag in lineDiagnostics) {
+            final diagStartLine = diag.range['start']['line'] as int;
+            final diagEndLine = diag.range['end']['line'] as int;
+            final diagStartChar = diag.range['start']['character'] as int;
+            final diagEndChar = diag.range['end']['character'] as int;
+            
+            int diagStart, diagEnd;
+            
+            if (diagStartLine == lineIndex && diagEndLine == lineIndex) {
+              diagStart = lineStart + diagStartChar;
+              diagEnd = lineStart + diagEndChar;
+            } else if (diagStartLine == lineIndex) {
+              diagStart = lineStart + diagStartChar;
+              diagEnd = spanEnd;
+            } else if (diagEndLine == lineIndex) {
+              diagStart = lineStart;
+              diagEnd = lineStart + diagEndChar;
+            } else {
+              diagStart = lineStart;
+              diagEnd = spanEnd;
+            }
+            
+            if (!(spanEnd <= diagStart || spanStart >= diagEnd)) {
+              hasDiagnostic = true;
+              diagnosticColor = switch (diag.severity) {
+                1 => Colors.red,
+                2 => Colors.amber,
+                3 => Colors.blueAccent,
+                _ => null,
+              };
+              break;
+            }
+          }
+          
+          if (hasDiagnostic && diagnosticColor != null) {
+            List<TextSpan> charSpans = [];
+            
+            for (int i = 0; i < text.length; i++) {
+              final globalIdx = spanStart + i;
+              bool inDiagnostic = false;
+              Color? charDiagColor;
+              
+              for (final diag in lineDiagnostics) {
+                final diagStartLine = diag.range['start']['line'] as int;
+                final diagEndLine = diag.range['end']['line'] as int;
+                final diagStartChar = diag.range['start']['character'] as int;
+                final diagEndChar = diag.range['end']['character'] as int;
+                
+                int diagStart, diagEnd;
+                
+                if (diagStartLine == lineIndex && diagEndLine == lineIndex) {
+                  diagStart = lineStart + diagStartChar;
+                  diagEnd = lineStart + diagEndChar;
+                } else if (diagStartLine == lineIndex) {
+                  diagStart = lineStart + diagStartChar;
+                  diagEnd = lineStart + text.length;
+                } else if (diagEndLine == lineIndex) {
+                  diagStart = lineStart;
+                  diagEnd = lineStart + diagEndChar;
+                } else {
+                  diagStart = lineStart;
+                  diagEnd = lineStart + text.length;
+                }
+                
+                if (globalIdx >= diagStart && globalIdx < diagEnd) {
+                  inDiagnostic = true;
+                  charDiagColor = switch (diag.severity) {
+                    1 => Colors.red,
+                    2 => Colors.amber,
+                    3 => Colors.blueAccent,
+                    _ => null,
+                  };
+                  break;
+                }
+              }
+              
+              TextStyle? charStyle = span.style;
+              if (inDiagnostic && charDiagColor != null) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  decoration: TextDecoration.underline,
+                  decorationStyle: TextDecorationStyle.wavy,
+                  decorationThickness: 2,
+                  decorationColor: charDiagColor,
+                );
+              }
+              
+              charSpans.add(TextSpan(text: text[i], style: charStyle));
+            }
+            
+            result.add(TextSpan(children: charSpans));
+          } else {
+            result.add(span);
+          }
+          
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applyDiagnosticsStyling(children, lineIndex, offset);
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += _textLengthFromSpans(childSpans);
+        }
+      }
+    }
+    
+    return result;
+  }
+
+  List<InlineSpan> _applySelectionToSpans(
+    List<InlineSpan> spans,
+    int lineStart,
+    int selectionStart,
+    int selectionEnd,
+    Color selectedColor,
+  ) {
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+  
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+  
+        if (text != null) {
+          int spanStart = offset;
+          int spanEnd = offset + text.length;
+  
+          if (selectionEnd <= spanStart || selectionStart >= spanEnd) {
+            result.add(span);
+          } else {
+            int selStartInSpan = max(selectionStart - spanStart, 0);
+            int selEndInSpan = min(selectionEnd - spanStart, text.length);
+  
+            if (selStartInSpan > 0) {
+              result.add(TextSpan(
+                text: text.substring(0, selStartInSpan),
+                style: span.style,
+              ));
+            }
+            result.add(TextSpan(
+              text: text.substring(selStartInSpan, selEndInSpan),
+              style: span.style?.copyWith(
+                backgroundColor: selectedColor
+              ) ?? TextStyle(backgroundColor: _selectionStyle.selectionColor),
+            ));
+            if (selEndInSpan < text.length) {
+              result.add(TextSpan(
+                text: text.substring(selEndInSpan),
+                style: span.style,
+              ));
+            }
+          }
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applySelectionToSpans(
+            children,
+            offset,
+            selectionStart,
+            selectionEnd,
+            selectedColor,
+          );
+          final childrenLength = childSpans.fold<int>(0, (sum, s) {
+            if (s is TextSpan && s.text != null) {
+              return sum + s.text!.length;
+            }
+            return sum;
+          });
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += childrenLength;
+        }
+      }
+    }
+    return result;
+  }
+
+  Set<int> _findUnmatchedBrackets(String text) {
+    final stack = <int>[];
+    final unmatched = <int>{};
+    const pairs = {'(': ')', '{': '}', '[': ']', "'": "'", '"': '"'};
+    const openers = {'(', '{', '[', "'", '"'};
+    const closers = {')', '}', ']', "'", '"'};
+    String? currentStringQuote;
+
+    for (int i = 0; i < text.length; i++) {
+      final char = text[i];
+
+      if (char == '"' || char == "'") {
+        if (currentStringQuote == null) {
+          currentStringQuote = char;
+          stack.add(i);
+        } else if (currentStringQuote == char) {
+          if (stack.isNotEmpty && text[stack.last] == char) {
+            stack.removeLast();
+            currentStringQuote = null;
+          } else {
+            unmatched.add(i);
+          }
+        } else {
+          continue;
+        }
+        continue;
+      }
+
+      if (currentStringQuote != null) continue;
+
+      if (openers.contains(char)) {
+        stack.add(i);
+      } else if (closers.contains(char)) {
+        if (stack.isEmpty) {
+          unmatched.add(i);
+        } else {
+          final lastOpen = stack.last;
+          final openChar = text[lastOpen];
+          if (pairs[openChar] == char) {
+            stack.removeLast();
+          } else {
+            unmatched.add(i);
+          }
+        }
+      }
+    }
+
+    unmatched.addAll(stack);
+    
+    return unmatched;
+  }
+
+  int? _findMatchingBracket(String text, int pos) {
+    const Map<String, String> pairs = {
+      '(': ')',
+      '{': '}',
+      '[': ']',
+      ')': '(',
+      '}': '{',
+      ']': '[',
+    };
+    const String openers = '({[';
+
+    if (pos < 0 || pos >= text.length) return null;
+
+    final char = text[pos];
+    if (!pairs.containsKey(char)) return null;
+
+    final match = pairs[char]!;
+    final isForward = openers.contains(char);
+
+    int depth = 0;
+    if (isForward) {
+      for (int i = pos + 1; i < text.length; i++) {
+        if (text[i] == char) depth++;
+        if (text[i] == match) {
+          if (depth == 0) return i;
+          depth--;
+        }
+      }
+    } else {
+      for (int i = pos - 1; i >= 0; i--) {
+        if (text[i] == char) depth++;
+        if (text[i] == match) {
+          if (depth == 0) return i;
+          depth--;
+        }
+      }
+    }
+    return null;
+  }
+
+  int _findFirstVisibleLine(double viewTop) {
+    if(_lineTops.isEmpty) return 0;
+    int low = 0, high = _lineTops.length - 1, mid;
+    while (low < high) {
+      mid = (low + high) >> 1;
+      if (_lineTops[mid] < viewTop) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low.clamp(0, _lineTops.length - 1);
+  }
+
+  int _findLastVisibleLine(double viewBottom) {
+    if (_lineTops.isEmpty) return 0;
+    int low = 0, high = _lineTops.length - 1, mid;
+    while (low < high) {
+      mid = (low + high + 1) >> 1;
+      if (_lineTops[mid] <= viewBottom) {
+        low = mid;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return low.clamp(0, _lineTops.length - 1);
+  }
+
+  List<_Pair> _computeBracketPairs(String text) {
+    final pairs = <_Pair>[];
+    final stack = <int>[];
+    const openers = {'(', '{', '['};
+    const closers = {')', '}', ']'};
+    const matching = {'(': ')', '{': '}', '[': ']'};
+
+    for (int i = 0; i < text.length; i++) {
+      final ch = text[i];
+      if (openers.contains(ch)) {
+        stack.add(i);
+      } else if (closers.contains(ch)) {
+        if (stack.isNotEmpty) {
+          final open = stack.removeLast();
+          final openChar = text[open];
+          if (matching[openChar] == ch) {
+            pairs.add(_Pair(open, i));
+          }
+        }
+      }
+    }
+    return pairs;
+  }
+
+  Map<String,int> _indexToLineCol(int idx, List<int> lineStarts, List<String> lines) {
+    int low = 0, high = lineStarts.length - 1;
+    while (low <= high) {
+      int mid = (low + high) >> 1;
+      if (lineStarts[mid] <= idx) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    final int line = high.clamp(0, lineStarts.length - 1);
+    final int col = idx - lineStarts[line];
+    return {'line': line, 'col': col};
+  }
+
+  TextPainter _getLinePainter(int line, List<InlineSpan> baseSpans, double maxWidth, TextStyle defaultStyle) {
+    final cached = _lineTpCache[line];
+    if (cached != null) return cached;
+    final tpLine = TextPainter(
+      text: TextSpan(style: defaultStyle, children: baseSpans),
+      textDirection: TextDirection.ltr,
+    );
+    tpLine.layout(maxWidth: maxWidth);
+    _lineTpCache[line] = tpLine;
+    return tpLine;
+  }
+
+  Set<int> _findUnmatchedQuotesInLine(String lineText, int lineStartOffset) {
+    final unmatched = <int>{};
+    int? unclosedStringStart;
+
+    for (int i = 0; i < lineText.length; i++) {
+      final char = lineText[i];
+      final globalIdx = lineStartOffset + i;
+
+      if (char == '"' || char == "'") {
+        if (unclosedStringStart == null) {
+          unclosedStringStart = globalIdx;
+        } else {
+          final openingQuoteChar = lineText[unclosedStringStart - lineStartOffset];
+          if (openingQuoteChar == char) {
+            unclosedStringStart = null;
+          }
+        }
+        continue;
+      }
+    }
+
+    if (unclosedStringStart != null) {
+      for (int i = (unclosedStringStart - lineStartOffset); i < lineText.length; i++) {
+        unmatched.add(lineStartOffset + i);
+      }
+    }
+    
+    return unmatched;
+  }
+
+  List<FoldRange> _getFoldRanges(List<String> lines) {
+    List<FoldRange> foldRanges = [];
+    if (!_enableFolding) return foldRanges;
+    
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      if (line.trim().isEmpty || !line.trim().endsWith(':')) continue;
+      
+      final startIndent = line.length - line.trimLeft().length;
+      int j = i + 1;
+      
+      while (j < lines.length) {
+        final next = lines[j];
+        if (next.trim().isEmpty) {
+          j++;
+          continue;
+        }
+        final nextIndent = next.length - next.trimLeft().length;
+        if (nextIndent <= startIndent) break;
+        j++;
+      }
+      
+      if (j > i + 1 && j <= lines.length) {
+        foldRanges.add(FoldRange(i, j - 1));
+      }
+    }
+    
+    final Map<String, List<int>> stacks = {"{": [], "[": [], "(": []};
+    const Map<String, String> matchingBrackets = {"{": "}", "[": "]", "(": ")"};
+    
+    for (final openBracket in matchingBrackets.keys) {
+      final closeBracket = matchingBrackets[openBracket]!;
+      for (int i = 0; i < lines.length; i++) {
+        if (lines[i].contains(openBracket)) stacks[openBracket]!.add(i);
+        if (lines[i].contains(closeBracket)) {
+          if (stacks[openBracket]!.isNotEmpty) {
+            int start = stacks[openBracket]!.removeLast();
+            if (i > start) {
+              bool conflictsWithColonFold = foldRanges.any((fold) => 
+                (fold.startIndex == start && fold.endIndex == i) ||
+                (fold.startIndex == start) ||
+                (fold.endIndex == i && fold.startIndex < start)
+              );
+              
+              if (!conflictsWithColonFold) {
+                foldRanges.add(FoldRange(start, i));
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    foldRanges.sort((a, b) => a.startIndex.compareTo(b.startIndex));
+    
+    return foldRanges;
+  }
+
+  Map<String, int> _offsetToLineChar(int offset) {
+    final lines = _controller.text.split('\n');
+    int accum = 0;
+    for (int i = 0; i < lines.length; i++) {
+      final lineLen = lines[i].length;
+      if (offset >= accum && offset <= accum + lineLen) {
+        return {
+          'line': i,
+          'character': offset - accum,
+        };
+      }
+      accum += lineLen + 1;
+    }
+    final last = lines.length - 1;
+    return {
+      'line': last,
+      'character': lines.isNotEmpty ? lines.last.length : 0,
+    };
+  }
+
+  bool _isOffsetOverWord(int offset) {
+    final text = _controller.text;
+    if (offset < 0 || offset >= text.length) return false;
+    return RegExp(r'\w').hasMatch(text[offset]);
+  }
+
+  int _getGlobalPositionFromVisible(int visiblePosition) {
+    final lines = _controller.text.split('\n');
+    int visibleOffset = 0;
+    int globalOffset = 0;
+
+    for (int i = 0; i < lines.length; i++) {
+      final isFolded = _foldRanges.any((fold) => 
+        fold.isFolded && i > fold.startIndex && i <= fold.endIndex);
+
+      if (!isFolded) {
+        final lineLength = lines[i].length;
+        if (visiblePosition >= visibleOffset && visiblePosition <= visibleOffset + lineLength) {
+          return globalOffset + (visiblePosition - visibleOffset);
+        }
+        visibleOffset += lineLength + 1;
+        globalOffset += lineLength + 1;
+      } else {
+        globalOffset += lines[i].length + 1;
+      }
+    }
+    return globalOffset;
+  }
+
+  bool _isWordBoundary(String char) {
+    return char.trim().isEmpty || !RegExp(r'\w').hasMatch(char);
+  }
+
+  List<String> _buildDisplayLinesWithAI() {
+    if (_aiResponse != null && _aiResponse!.isNotEmpty && _controller.selection.isValid) {
+      final cursorPosition = _controller.selection.extentOffset;
+      final before = _controller.text.substring(0, cursorPosition);
+      final after = _controller.text.substring(cursorPosition);
+      return (before + _aiResponse! + after).split('\n');
+    } 
+    return _controller.text.split('\n');
+    
+  }
+
+  void _toggleFold(FoldRange fold) {
+    if (fold.isFolded) {
+      _unfoldWithChildren(fold);
+    } else {
+      _foldWithChildren(fold);
+    }
+    _controller.folds = _foldRanges;
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+
+  void _foldWithChildren(FoldRange parentFold) {
+    parentFold.clearOriginallyFoldedChildren();
+    
+    for (final childFold in _foldRanges) {
+      if (childFold.isFolded && 
+          childFold != parentFold &&
+          childFold.startIndex > parentFold.startIndex && 
+          childFold.endIndex <= parentFold.endIndex) {
+        parentFold.addOriginallyFoldedChild(childFold);
+        childFold.isFolded = false;
+      }
+    }
+    
+    parentFold.isFolded = true;
+  }
+
+  void _unfoldWithChildren(FoldRange parentFold) {
+    parentFold.isFolded = false;
+    for (final childFold in parentFold.originallyFoldedChildren) {
+      if (childFold.startIndex > parentFold.startIndex && 
+          childFold.endIndex <= parentFold.endIndex) {
+        childFold.isFolded = true;
+      }
+    }
+    parentFold.clearOriginallyFoldedChildren();
+  }
+
+  int _getLineAtOffset(int offset) {
+    final text = _controller.text;
+    final beforeCursor = text.substring(0, offset.clamp(0, text.length));
+    return beforeCursor.split('\n').length - 1;
+  }
+  
+ void _autoUnfoldOnEdit(int lineIndex) {
+  bool needsUpdate = false;
+  
+  for (final fold in _foldRanges) {
+    if (fold.isFolded && 
+        (fold.startIndex == lineIndex || 
+         (lineIndex > fold.startIndex && lineIndex <= fold.endIndex))) {
+      fold.isFolded = false;
+      
+      for (final child in fold.originallyFoldedChildren) {
+        child.isFolded = true;
+      }
+      fold.clearOriginallyFoldedChildren();
+      
+      needsUpdate = true;
+    }
+  }
+  
+  if (needsUpdate) {
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+}
+
+  void _autoUnfoldOnSelection(int startLine, int endLine) {
+    bool needsUpdate = false;
+    
+    for (final fold in _foldRanges) {
+      if (!fold.isFolded) continue;
+      
+      final selectionAffectsFold = 
+        (startLine <= fold.startIndex && endLine >= fold.startIndex) ||
+        (startLine <= fold.endIndex && endLine >= fold.endIndex) ||
+        (startLine > fold.startIndex && endLine <= fold.endIndex) ||
+        (startLine >= fold.startIndex && startLine <= fold.endIndex) ||
+        (endLine >= fold.startIndex && endLine <= fold.endIndex);
+      
+      if (selectionAffectsFold) {
+        fold.isFolded = false;
+        
+        for (final child in fold.originallyFoldedChildren) {
+          child.isFolded = true;
+        }
+        fold.clearOriginallyFoldedChildren();
+        
+        needsUpdate = true;
+      }
+    }
+    
+    if (needsUpdate) {
+      markNeedsLayout();
+      markNeedsPaint();
+    }
+  }
+
+  void _drawIndentationGuidelines(Canvas canvas, Offset offset, List<String> displayLines, int firstVisibleLine, int lastVisibleLine, double maxLinePainterWidth) {
+    if (!_enableGuideLines) return;
+    
+    final tempMeasure = TextPainter(
+      text: TextSpan(
+        text: " ",
+        style: _textStyle ?? _editorTheme['root']
+      ),
+      textDirection: TextDirection.ltr
+    );
+    tempMeasure.layout();
+
+    final double charWidth = tempMeasure.width;
+    final viewTop = _vscrollController.offset;
+    final viewBottom = viewTop + _vscrollController.position.viewportDimension;
+    final cursorPosition = _controller.selection.extentOffset;
+    final textBeforeCursor = _controller.text.substring(0, cursorPosition.clamp(0, _controller.text.length));
+    final currentLine = textBeforeCursor.split('\n').length - 1;
+    final tabSize = 4;
+    List<({int startLine, int endLine, int indentLevel})> blocks = [];
+    
+    for (int i = 0; i < displayLines.length; i++) {
+      if (_foldRanges.any((fold) => fold.isFolded && i > fold.startIndex && i <= fold.endIndex)) {
+        continue;
+      }
+      
+      final line = displayLines[i];
+      if (!line.trimRight().endsWith(':')) continue;
+      
+      final indent = line.length - line.trimLeft().length;
+      final indentLevel = indent ~/ tabSize;
+      
+      int endLine = i + 1;
+      while (endLine < displayLines.length) {
+        final nextLine = displayLines[endLine];
+        if (nextLine.trim().isEmpty) {
+          endLine++;
+          continue;
+        }
+        final nextIndent = nextLine.length - nextLine.trimLeft().length;
+        if (nextIndent <= indent) break;
+        endLine++;
+      }
+      
+      if (endLine <= i + 1) continue;
+      if (i + 1 >= _lineTops.length || endLine - 1 >= _lineTops.length || endLine - 1 >= _lineHeights.length) continue;
+      
+      blocks.add((startLine: i, endLine: endLine, indentLevel: indentLevel));
+    }
+    
+    int? selectedBlockIndex;
+    int minBlockSize = 999999;
+    
+    for (int idx = 0; idx < blocks.length; idx++) {
+      final block = blocks[idx];
+      if (currentLine >= block.startLine && currentLine < block.endLine) {
+        final blockSize = block.endLine - block.startLine;
+        if (blockSize < minBlockSize) {
+          minBlockSize = blockSize;
+          selectedBlockIndex = idx;
+        }
+      }
+    }
+    
+    for (int idx = 0; idx < blocks.length; idx++) {
+      final block = blocks[idx];
+      final isSelected = selectedBlockIndex == idx;
+      
+      final Paint guidePaint = Paint()
+        ..color = isSelected
+            ? (_editorTheme['root']?.color ?? Colors.grey)
+            : (_editorTheme['root']?.color ?? Colors.grey).withAlpha(100)
+        ..strokeWidth = isSelected ? 0.7 : 0.3
+        ..style = PaintingStyle.stroke;
+      
+      final double yTop = offset.dy
+        + (_innerPadding?.top ?? 0)
+        + _lineTops[block.startLine + 1]
+        - _vscrollController.offset;
+      
+      final double yBottom = offset.dy
+        + (_innerPadding?.top ?? 0)
+        + _lineTops[block.endLine - 1]
+        + _lineHeights[block.endLine - 1]
+        - _vscrollController.offset;
+      
+      if (yBottom < 0 || yTop > viewBottom) continue;
+      
+      final double guideX = offset.dx
+        + _gutterWidth
+        + (_innerPadding?.left ?? 0)
+        + ((block.indentLevel * charWidth) * tabSize)
+        - (_lineWrap ? 0 : _hscrollController.offset);
+      
+      final double clampedYTop = yTop.clamp(0.0, viewBottom);
+      final double clampedYBottom = yBottom.clamp(0.0, viewBottom);
+      
+      if (guideX >= _gutterWidth && guideX <= size.width) {
+        canvas.drawLine(
+          Offset(guideX, clampedYTop),
+          Offset(guideX, clampedYBottom),
+          guidePaint
+        );
+      }
+    }
+  }
+  
+  @override
+  bool hitTestSelf(Offset position) => true;
+
+  int? _dragStartOffset;
+  Timer? _selectionTimer, _hoverTimer;
+  bool _selectionActive = false, _isDragging = false;
+  Offset? _pointerDownPosition;
+
+  @override
+  void handleEvent(PointerEvent event, covariant BoxHitTestEntry entry) {
+    final localPosition = event.localPosition;
+    _currerntPosition = localPosition;
+    final padded = Offset(
+      localPosition.dx
+        - (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+        + _hscrollController.offset
+        - _gutterWidth,
+      localPosition.dy
+        - (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+        + _vscrollController.offset
+    );
+    TextPosition offset = _codeContent?.tp.getPositionForOffset(padded)
+    ?? TextPosition(offset: _controller.selection.extentOffset);
+
+    final globalOffset = _getGlobalPositionFromVisible(offset.offset);
+    if (globalOffset != -1) {
+      offset = TextPosition(offset: globalOffset);
+    }
+
+    if(event is PointerHoverEvent){
+      if(!(_hoverNotifier.value != null && _isHoveringPopup.value)){
+        _hoverNotifier.value = null;
+      }
+      
+      if(
+        (_hoverNotifier.value == null || !_isHoveringPopup.value) &&
+        _isOffsetOverWord(offset.offset)
+        ){
+        _hoverTimer?.cancel();
+        _hoverTimer = Timer(Duration(milliseconds: 1500), (){
+          final lineChar = _offsetToLineChar(offset.offset);
+          _hoverNotifier.value = [event.localPosition, lineChar];
+        });
+      } else {
+        _hoverNotifier.value = null;
+      }
+    }
+
+    void select(){
+      _selectionActive = _selectionNotifier.value = true;
+      final text = _controller.text;
+      final pos = offset.offset;
+      int start = pos, end = pos;
+      while (start > 0 && !_isWordBoundary(text[start - 1])) {
+        start--;
+      }
+      while (end < text.length && !_isWordBoundary(text[end])) {
+        end++;
+      }
+      _controller.selection = TextSelection(baseOffset: start, extentOffset: end);
+    }
+
+    if(
+      event is PointerDownEvent && event.buttons == kSecondaryButton ||
+      event is PointerUpEvent && isMobile && _selectionActive
+    ){
+      _offsetNotifier.value = event.localPosition;   
+    }
+
+    if (event is PointerDownEvent && event.buttons == kPrimaryButton) {
+      if(_offsetNotifier.value.dx > 0 || _offsetNotifier.value.dy > 0){
+        _offsetNotifier.value = Offset(-1, -1);
+      }
+
+      _dragStartOffset = offset.offset;
+      _dtap.addPointer(event);
+      _oneTap.addPointer(event);
+
+
+      if (isMobile) {
+        _dtap.onDoubleTap = (){
+          select();
+          _offsetNotifier.value = event.localPosition;
+        };
+
+        _oneTap.onTap = (){
+          if(_hoverNotifier.value != null) {
+            _hoverNotifier.value = null;
+          } else if(_isOffsetOverWord(offset.offset)) {
+            final lineChar = _offsetToLineChar(offset.offset);
+            _hoverNotifier.value = [localPosition, lineChar];
+          }
+        };
+
+        _draggingCHandle = false;
+        _draggingStartHandle = false;
+        _draggingEndHandle = false;
+        if (_controller.selection.baseOffset != _controller.selection.extentOffset) {
+          if (_startHandleRect?.contains(event.localPosition) ?? false) {
+            _draggingStartHandle = true;
+            _selectionActive = _selectionNotifier.value = true;
+            _pointerDownPosition = event.localPosition;
+            return;
+          }
+          if (_endHandleRect?.contains(event.localPosition) ?? false) {
+            _draggingEndHandle = true;
+            _selectionActive = _selectionNotifier.value = true;
+            _pointerDownPosition = event.localPosition;
+            return;
+          }
+        } else if(_normalHandle?.contains(event.localPosition) ?? false) {
+          _draggingCHandle = true;
+          _draggingStartHandle = _draggingEndHandle = false;
+          _selectionActive = _selectionNotifier.value = true;
+          _controller.selection = TextSelection.collapsed(offset: offset.offset);
+          _pointerDownPosition = event.localPosition;
+          return;
+        }
+
+        _dragStartOffset = offset.offset;
+        _isDragging = false;
+        _pointerDownPosition = event.localPosition;
+        _selectionActive = _selectionNotifier.value = false;
+        _selectionTimer?.cancel();
+        _selectionTimer = Timer(const Duration(milliseconds: 500), select);
+      } else{
+        _controller.selection = TextSelection.collapsed(offset: offset.offset);
+      }
+
+      for (final fold in _foldRanges) {
+        if (fold.startIndex >= _lineTops.length) continue;
+        final isInsideFoldedParent = _foldRanges.any(
+          (parent) => parent.isFolded && 
+                      parent.startIndex < fold.startIndex && 
+                      parent.endIndex >= fold.startIndex
+        );
+        
+        if (isInsideFoldedParent) continue;
+        
+        final iconRect = Rect.fromLTWH(
+          _gutterWidth - (_textStyle?.fontSize ?? 15) + (_innerPadding?.left ?? 0),
+          _lineTops[fold.startIndex] + (_innerPadding?.top ?? 0) - _vscrollController.offset,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+        );
+        
+        if (iconRect.contains(event.localPosition)) {
+          _toggleFold(fold);
+          return;
+        }
+      }
+    } 
+
+    if (event is PointerMoveEvent && _dragStartOffset != null) {
+      if(isMobile) {
+        final pos = _codeContent?.tp.getPositionForOffset(padded) ?? 
+            TextPosition(offset: _controller.selection.extentOffset);
+            
+        if (_draggingCHandle) {
+          _controller.selection = TextSelection.collapsed(offset: pos.offset);
+          markNeedsPaint();
+          return;
+        }
+
+        if (_draggingStartHandle || _draggingEndHandle) {
+          final base = _controller.selection.start;
+          final extent = _controller.selection.end;
+
+           if (_draggingStartHandle) {
+            final moving = pos.offset;
+
+            _controller.selection = TextSelection(
+              baseOffset: moving,
+              extentOffset: extent,
+            );
+
+            if (moving > extent) {
+              _draggingStartHandle = false;
+              _draggingEndHandle = true;
+            }
+          } else {
+            final moving = pos.offset;
+
+            _controller.selection = TextSelection(
+              baseOffset: base,
+              extentOffset: moving,
+            );
+
+            if (moving < base) {
+              _draggingEndHandle = false;
+              _draggingStartHandle = true;
+            }
+          }
+
+          markNeedsPaint();
+          return;
+        }
+
+        if (_dragStartOffset != null) {
+          if (isMobile) {
+            if ((event.localPosition - (_pointerDownPosition ?? event.localPosition)).distance > 10) {
+              _isDragging = true;
+            }
+            if (!_selectionActive) return;
+          }
+
+          _controller.selection = TextSelection(
+            baseOffset: _dragStartOffset!,
+            extentOffset: pos.offset,
+          );
+        }
+
+        if ((event.localPosition - _pointerDownPosition!).distance > 10) {
+          _isDragging = true;
+        }
+        if(!_selectionActive) return;
+      }
+      
+      final offset = _codeContent?.tp.getPositionForOffset(padded)
+        ?? TextPosition(offset: _controller.selection.extentOffset);
+  
+      _controller.selection = TextSelection(
+        baseOffset: _dragStartOffset!,
+        extentOffset: offset.offset,
+      );
+    }
+
+    if (event is PointerUpEvent || event is PointerCancelEvent) {
+      if(!_isDragging && isMobile && !_selectionActive){
+        _controller.selection = TextSelection.collapsed(offset: offset.offset);
+      }
+      _draggingStartHandle = false;
+      _draggingEndHandle = false;
+      _draggingCHandle = false;
+      _pointerDownPosition = null;
+      _dragStartOffset = null;
+      _selectionTimer?.cancel();
+      _selectionActive = _selectionNotifier.value = false;
+      if(_readOnly) return;
+      if(isMobile && !_isDragging){
+        _commonF(_controller);
+      } else if(!isMobile){
+        _controller.refresh();
+      }
+      _isDragging = false;
+    }
+
+    super.handleEvent(event, entry);
+  }
+
+  @override
+  void performLayout() {
+    final maxW = constraints.hasBoundedWidth ? constraints.maxWidth : 1000.0;
+    _lineTops.clear();
+    _lineHeights.clear();
+
+    List<String> displayLines = _buildDisplayLinesWithAI();
+
+    final defaultStyle = _textStyle ?? _editorTheme['root'];
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+
+    double y = 0;
+    double maxLineWidth = 0;
+    
+    for (int i = 0; i < displayLines.length; i++) {
+      bool isFolded = _foldRanges.any(
+        (fold) => 
+          fold.isFolded && i > fold.startIndex && i <= fold.endIndex
+        );
+      
+      if (isFolded) {
+        _lineTops.add(y);
+        _lineHeights.add(0);
+      } else {
+        tp.text = TextSpan(text: displayLines[i], style: defaultStyle);
+        final tpWidth = _lineWrap ? maxW - (_innerPadding?.horizontal ?? 0) - _gutterWidth : double.infinity;
+        tp.layout(maxWidth: tpWidth);
+        maxLineWidth = max(maxLineWidth, tp.width);
+        _lineTops.add(y);
+        _lineHeights.add(tp.height);
+        y += tp.height;
+      }
+    }
+
+    final contentWidth = maxLineWidth + (_innerPadding?.horizontal ?? 0);
+    final contentHeight = y + (_innerPadding?.vertical ?? 0);
+
+    size = constraints.constrain(Size(contentWidth, contentHeight));
+  }
+  
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    int? bracket1, bracket2;
+    final selection = _controller.selection;
+    final cursorPosition = selection.extentOffset;
+    String text = _lines.join('\n');
+    String controllerText = _controller.text;
+
+    if (cursorPosition >= 0 && cursorPosition <= text.length) {
+      final String? before = cursorPosition > 0
+          ? text[cursorPosition - 1]
+          : null;
+      final String? after = cursorPosition < text.length
+          ? text[cursorPosition]
+          : null;
+      final int? pos = (before != null && '{}[]()'.contains(before))
+          ? cursorPosition - 1
+          : (after != null && '{}[]()'.contains(after))
+          ? cursorPosition
+          : null;
+
+      if (pos != null) {
+        final match = _findMatchingBracket(text, pos);
+        if (match != null) {
+          bracket1 = pos;
+          bracket2 = match;
+        }
+      }
+    }
+
+    final canvas = context.canvas;
+    canvas.save();
+    canvas.drawPaint(
+      Paint()
+        ..color = _editorTheme['root']!.backgroundColor ?? Colors.transparent
+        ..style = PaintingStyle.fill
+    );
+    final defaultStyle = _textStyle ?? editorTheme['root'];
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+    final gutterPainter = TextPainter(textDirection: TextDirection.ltr);
+    final foldIconPainter = TextPainter(textDirection: TextDirection.ltr);
+
+    final unfoldIcon = _gutterStyle.unfoldedIcon; 
+    final foldIcon = _gutterStyle.foldedIcon;
+
+    final viewTop = _vscrollController.offset;
+    final viewBottom = viewTop + _vscrollController.position.viewportDimension;
+  
+    final selectedColor = _selectionStyle.selectionColor;
+  
+    final firstVisibleLine = _findFirstVisibleLine(viewTop);
+    final lastVisibleLine = _findLastVisibleLine(viewBottom);
+
+    List<String> displayLines;
+    if (_inFlightEdits.isNotEmpty) {
+      displayLines = controllerText.split('\n');
+      for (final entry in _inFlightEdits.entries) {
+        if (entry.key < displayLines.length) {
+          displayLines[entry.key] = entry.value;
+        }
+      }
+    } else {
+      displayLines = _buildDisplayLinesWithAI();
+    }
+
+    int aiStart = -1, aiEnd = -1;
+    if (_aiResponse != null && _aiResponse!.isNotEmpty && _controller.selection.isValid) {
+      aiStart = _controller.selection.extentOffset;
+      aiEnd = aiStart + _aiResponse!.length;
+      _controller.isShowingAiSuggestion = true;
+    }
+
+    final Set<int> unmatchedBrackets = _findUnmatchedBrackets(text).where((index) {
+      final char = text[index];
+      return '{}[]()'.contains(char);
+    }).toSet();
+
+    if (displayLines.isNotEmpty && _lineTops.isNotEmpty) {
+      int spanOffset = 0;
+      for (int i = 0; i < displayLines.length; i++) {
+        final displayText = displayLines[i];
+        final lineLength = displayText.length;
+        final lineStart = spanOffset;
+        final lineEnd = spanOffset + lineLength;
+        
+        if (i >= _lineTops.length ||
+            i < firstVisibleLine ||
+            i > lastVisibleLine ||
+            _foldRanges.any(
+              (item)=> item.startIndex < i && item.endIndex >= i && item.isFolded
+            )
+        ) {
+          spanOffset += lineLength + 1;
+          continue;
+        }
+        
+        final contentTop = _lineTops[i];
+
+        late List<InlineSpan> lineSpans;
+
+        if (aiStart >= 0 && aiEnd > aiStart && lineEnd > aiStart && lineStart < aiEnd) {
+          final aiLineStart = max(aiStart, lineStart) - lineStart;
+          final aiLineEnd = min(aiEnd, lineEnd) - lineStart;
+          final beforeAI = displayText.substring(0, aiLineStart);
+          final aiText = displayText.substring(aiLineStart, aiLineEnd);
+          final afterAI = displayText.substring(aiLineEnd);
+
+          final beforeSpans = _convert(
+            highlight.parse(beforeAI, language: _langId).nodes ?? [],
+            lineStart,
+          );
+          final aiSpans = TextSpan(
+            text: aiText,
+            style: defaultStyle?.copyWith(
+              color: Colors.grey[400],
+              fontStyle: FontStyle.italic
+            )
+          );
+          final afterSpans = _convert(
+            highlight.parse(afterAI, language: _langId).nodes ?? [],
+            lineStart + aiLineEnd,
+          );
+
+          lineSpans = [
+            ...beforeSpans,
+            aiSpans,
+            ...afterSpans,
+          ];
+        } else {
+          if (_cachedSpans[i] != null && _cachedSpans[i]!.isNotEmpty && !_inFlightEdits.containsKey(i)) {
+            lineSpans = _cachedSpans[i]!;
+          } else {
+            final nodes = highlight.parse(displayText, language: _langId).nodes ?? [];
+            lineSpans = _convert(nodes, lineStart);
+            if (!_inFlightEdits.containsKey(i)) _cachedSpans[i] = lineSpans;
+          }
+        }
+
+        final Set<int> unmatchedQuotes = _findUnmatchedQuotesInLine(displayText, lineStart);
+        final Set<int> allUnmatched = {...unmatchedBrackets, ...unmatchedQuotes};
+
+        lineSpans = _applyBracketHighlight(
+          lineSpans,
+          lineStart,
+          bracket1,
+          bracket2,
+          allUnmatched
+        );
+
+        lineSpans = _applyDiagnosticsStyling(lineSpans, i, lineStart);
+
+        if (!_inFlightEdits.containsKey(i) && selection.start < lineEnd && selection.end > lineStart) {
+          final selStart = selection.start.clamp(lineStart, lineEnd);
+          final selEnd = selection.end.clamp(lineStart, lineEnd);
+          lineSpans = _applySelectionToSpans(
+            lineSpans,
+            lineStart,
+            selStart,
+            selEnd,
+            selectedColor,
+          );
+        }
+
+        tp.text = TextSpan(
+          style: defaultStyle?.merge(
+            _foldRanges.any((fold) => fold.isFolded && fold.startIndex == i)
+              ? TextStyle(backgroundColor: _editorTheme['root']?.color?.withAlpha(50))
+              : null
+          ),
+          children: [
+            ...lineSpans,
+            if (_foldRanges.any((fold) => fold.isFolded && fold.startIndex == i))
+            TextSpan(text: ' ...', style: defaultStyle),
+          ]
+        );
+        final tpWidth = _lineWrap ? size.width - (_innerPadding?.horizontal ?? 0) : double.infinity;
+        tp.layout(maxWidth: tpWidth);
+        tp.paint(
+          canvas,
+          offset + Offset(
+            (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+              + _gutterWidth - (_lineWrap ? 0 : _hscrollController.offset)
+              ,
+            (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+              + contentTop
+              - _vscrollController.offset,
+          ),
+        );
+
+        spanOffset += lineLength + 1;
+      }
+      
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, _gutterWidth, viewBottom),
+        Paint()
+        ..style = PaintingStyle.fill
+        ..color = _gutterStyle.backgroundColor ??
+          _editorTheme['root']!.backgroundColor ??
+          Colors.transparent
+      );
+
+      if(_enableGutterDivider) {
+        canvas.drawRect(
+          Rect.fromLTWH(_gutterWidth, 0, 0.2, viewBottom),
+          Paint()
+            ..style = PaintingStyle.fill
+            ..color = _editorTheme['root']!.color!
+        );
+      }
+
+      for(int i=0; i<displayLines.length; i++){
+        if (
+          i >= _lineTops.length ||
+          i < firstVisibleLine ||
+          i > lastVisibleLine ||
+          _foldRanges.any(
+            (item)=> item.startIndex < i && item.endIndex >= i && item.isFolded
+          )
+        ) {
+          continue;
+        }
+
+        final contentTop = _lineTops[i];
+        gutterPainter.text = TextSpan(
+          text: (i + 1).toString(),
+          style: _gutterStyle.lineNumberStyle ?? defaultStyle
+        );
+
+        gutterPainter.textAlign = TextAlign.center;
+        gutterPainter.layout();
+        _gutterWidth = max(_gutterWidth, gutterPainter.width);
+
+        gutterPainter.paint(
+          canvas,
+          Offset(
+            offset.dx +  (_gutterWidth - gutterPainter.width) / 2,
+            offset.dy
+              + (_innerPadding?.vertical ?? 0)
+              + contentTop
+              - _vscrollController.offset
+          ),
+        );
+        
+        if(_foldRanges.isNotEmpty && _foldRanges.any((item)=> item.startIndex == i)){
+          final bool isInsideFoldedParent = _foldRanges.any(
+            (parent) => parent.isFolded && parent.startIndex < i && parent.endIndex >= i
+          );
+
+          if (!isInsideFoldedParent) {
+            final currentFolditem = _foldRanges.firstWhere((item) => item.startIndex == i);
+            final icon = currentFolditem.isFolded ? foldIcon : unfoldIcon;
+            foldIconPainter.text = TextSpan(
+              text: String.fromCharCode(icon.codePoint),
+              style: TextStyle(
+                color: (
+                  currentFolditem.isFolded ?
+                    _gutterStyle.foldedIconColor : _gutterStyle.unfoldedIconColor
+                ) ?? _editorTheme['root']?.color,
+                fontSize: (_textStyle?.fontSize ?? 15) + 2,
+                fontFamily: icon.fontFamily,
+                package: icon.fontPackage
+              )
+            );
+            
+            foldIconPainter.layout(maxWidth: _textStyle?.fontSize ?? 15);
+            foldIconPainter.paint(
+              canvas,
+              Offset(
+                _gutterWidth - foldIconPainter.width + (_innerPadding?.left ?? 0),
+                offset.dy + contentTop + (_innerPadding?.top ?? 0) - _vscrollController.offset + 1
+              )
+            );
+          }
+        }
+ 
+      }
+
+      canvas.save();
+      canvas.clipRect(Rect.fromLTWH(_gutterWidth, 0, size.width - _gutterWidth, size.height));
+
+      canvas.restore();
+
+      List<int> lineStarts = [];
+      int p = 0;
+      for (final l in displayLines) {
+        lineStarts.add(p);
+        p += l.length + 1;
+      }
+
+      List<_Pair> pairsToDraw = [];
+      for (final pr in _cachedBracketPairs) {
+        final openInfo = _indexToLineCol(pr.a, lineStarts, displayLines);
+        final closeInfo = _indexToLineCol(pr.b, lineStarts, displayLines);
+        final oLine = openInfo['line']!;
+        final cLine = closeInfo['line']!;
+        if (oLine != cLine && cLine >= firstVisibleLine && oLine <= lastVisibleLine) {
+          pairsToDraw.add(pr);
+        }
+      }
+
+      final double maxLinePainterWidth = _lineWrap ? size.width - (_innerPadding?.horizontal ?? 0) : double.infinity;
+
+      for (final pair in pairsToDraw) {
+        final open = _indexToLineCol(pair.a, lineStarts, displayLines);
+        final close = _indexToLineCol(pair.b, lineStarts, displayLines);
+        final int openLine = open['line']!;
+        final int closeLine = close['line']!;
+        if (openLine == closeLine) continue;
+
+        final bool isSelected = 
+          (bracket1 == pair.a && bracket2 == pair.b) ||
+          (bracket1 == pair.b && bracket2 == pair.a);
+
+        final Paint guidePaint = Paint()
+          ..color = isSelected
+              ? (_editorTheme['root']?.color ?? _textStyle?.color ?? Colors.grey)
+              : (_editorTheme['root']?.color ?? _textStyle?.color ?? Colors.grey).withAlpha(150)
+          ..strokeWidth = isSelected ? 0.7 : 0.3
+          ..style = PaintingStyle.stroke;
+
+        final String openLineText = displayLines[openLine];
+        final int openLeading = RegExp(r'^(\s*)').firstMatch(openLineText)?.group(0)?.length ?? 0;
+        List<InlineSpan> baseSpans;
+        if (_cachedSpans[openLine] != null && _cachedSpans[openLine]!.isNotEmpty) {
+          baseSpans = _cachedSpans[openLine]!;
+        } else {
+          final nodesForLine = highlight.parse(displayLines[openLine], language: _langId).nodes ?? [];
+          baseSpans = _convert(nodesForLine, lineStarts[openLine]);
+          _cachedSpans[openLine] = baseSpans;
+        }
+
+        final tpLine = _getLinePainter(openLine, baseSpans, maxLinePainterWidth, defaultStyle ?? TextStyle());
+
+        final dxLocal = tpLine.getOffsetForCaret(
+          TextPosition(offset: openLeading),
+          Rect.zero
+        ).dx;
+
+        final double guideX = offset.dx
+            + _gutterWidth
+            + (_innerPadding?.left ?? 0)
+            + dxLocal
+            - (_lineWrap ? 0 : _hscrollController.offset);
+
+        final double yTop = offset.dy
+          + (_innerPadding?.top ?? 0) 
+          + _lineTops[openLine + 1]
+          - _vscrollController.offset;
+        final double yBottom = offset.dy
+          + (_innerPadding?.top ?? 0)
+          + _lineTops[closeLine - 1]
+          + _lineHeights[closeLine]
+          - _vscrollController.offset;
+
+        if (guideX < _gutterWidth || guideX > size.width) continue;
+
+        final double fromY = yTop.clamp(0.0, viewBottom);
+        final double toY = yBottom.clamp(0.0, viewBottom);
+
+        if(_enableGuideLines) {
+          canvas.drawLine(
+            Offset(guideX, fromY), Offset(guideX, toY),
+            guidePaint
+          );
+        }
+      }
+
+      _drawIndentationGuidelines(
+        canvas,
+        offset,
+        displayLines,
+        firstVisibleLine,
+        lastVisibleLine,
+        maxLinePainterWidth
+      );
+    }
+  
+    if (_focusNode.hasFocus) {
+      final caretX = (_innerPadding?.left ?? 0)
+        + _gutterWidth
+        + _carretOffset.dx
+        - (_lineWrap ? 0 : _hscrollController.offset);
+      final caretY = (_innerPadding?.top ?? 0)
+        + _carretOffset.dy
+        - _vscrollController.offset;
+
+      if(_showCaret){
+        canvas.drawRect(
+          Rect.fromLTWH(
+            caretX,
+            caretY,
+            1.5,
+            _caretHeight
+          ),
+          _caretPainter,
+        );
+      }
+      
+      if(isMobile){
+        final Paint bubblePainter = Paint()
+        ..color = _selectionStyle.cursorBubbleColor
+        ..style = PaintingStyle.fill;
+
+        if(selection.end > selection.start){
+          final tpFull = TextPainter(
+            text: TextSpan(
+              text: _controller.text,
+              style: _textStyle,
+            ),
+            textDirection: TextDirection.ltr,
+          );
+          tpFull.layout();
+
+          final startCaret = tpFull.getOffsetForCaret(
+            TextPosition(offset: selection.start),
+            Rect.zero,
+          );
+          final endCaret = tpFull.getOffsetForCaret(
+            TextPosition(offset: selection.end),
+            Rect.zero,
+          );
+
+          final startCaretX = (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+            + startCaret.dx
+            + _gutterWidth
+            - (_lineWrap ? 0 : _hscrollController.offset);
+          final startCaretY = (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+            + startCaret.dy
+            - _vscrollController.offset;
+
+          final endCaretX = (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+            + endCaret.dx
+            + _gutterWidth
+            - (_lineWrap ? 0 : _hscrollController.offset);
+          final endCaretY = (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+            + endCaret.dy
+            - _vscrollController.offset;
+
+          canvas.drawRect(
+            Rect.fromLTWH(
+              startCaretX,
+              startCaretY,
+              1.5,
+              _caretHeight
+            ),
+            _caretPainter,
+          );
+          
+          _startHandleRect = Rect.fromLTWH(
+              startCaretX - _caretHeight,
+              startCaretY + _caretHeight,
+              _caretHeight,
+              _caretHeight,
+            );
+          
+          _endHandleRect = Rect.fromLTWH(
+              endCaretX,
+              endCaretY + _caretHeight,
+              _caretHeight,
+              _caretHeight,
+            );
+
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              _startHandleRect!,
+              topLeft: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25)
+            ),
+            bubblePainter,
+          );
+
+          canvas.drawRect(
+            Rect.fromLTWH(
+              endCaretX,
+              endCaretY,
+              1.5,
+              _caretHeight,
+            ),
+            _caretPainter,
+          );
+
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              _endHandleRect!,
+              topRight: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25)
+            ),
+            bubblePainter,
+          );
+
+          canvas.restore();
+        } else if(_showBubble) {
+          final handleSize = _caretHeight;
+          final handleCenterX = caretX;
+          final handleCenterY = caretY + _caretHeight;
+        
+          _normalHandle = Rect.fromLTWH(
+            handleCenterX,
+            handleCenterY,
+            handleSize,
+            handleSize,
+          );
+
+          canvas.save();
+          canvas.translate(handleCenterX, handleCenterY);
+          canvas.rotate(pi / 4);
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              Rect.fromCenter(center: Offset(_caretHeight / 2, _caretHeight / 2), width: handleSize, height: handleSize),
+              topRight: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25),
+            ),
+            bubblePainter,
+          );
+          canvas.restore();
+
+          if (_draggingCHandle) {
+            final caretLineIndex = _controller.selection.base.offset == -1
+                ? 0
+                : _controller.text.substring(0, _controller.selection.base.offset).split('\n').length - 1;
+            final lines = _controller.text.split('\n');
+            final lineText = (caretLineIndex >= 0 && caretLineIndex < lines.length)
+                ? lines[caretLineIndex]
+                : '';
+          
+            final caretInLine = _controller.selection.base.offset -
+                (caretLineIndex > 0 ? lines.take(caretLineIndex).map((l) => l.length + 1).reduce((a, b) => a + b) : 0);
+            final previewStart = caretInLine.clamp(0, lineText.length);
+            final previewEnd = (caretInLine + 10).clamp(0, lineText.length);
+            final previewText = lineText.substring(
+              max(0, previewStart - 10),
+              min(lineText.length, previewEnd),
+            );
+          
+            final zoomPainter = TextPainter(
+              text: TextSpan(
+                children: _convert(highlight.parse(
+                  previewText,
+                  language: _langId
+                ).nodes ?? []),
+                style: (_textStyle ?? _editorTheme['root'])?.copyWith(
+                  fontSize: (_textStyle?.fontSize ?? 14) * 1.5,
+                  backgroundColor: _editorTheme['root']?.backgroundColor ?? Colors.transparent
+                )
+              ),
+              textDirection: TextDirection.ltr,
+            );
+            zoomPainter.layout(maxWidth: size.width * 0.6);
+          
+            final zoomBoxWidth = zoomPainter.width + 16;
+            final zoomBoxHeight = zoomPainter.height + 12;
+            final zoomBoxX = caretX - zoomBoxWidth / 2;
+            final zoomBoxY = caretY - zoomBoxHeight - 18;
+          
+            final rrect = RRect.fromRectAndRadius(
+              Rect.fromLTWH(zoomBoxX, zoomBoxY, zoomBoxWidth, zoomBoxHeight),
+              Radius.circular(12),
+            );
+            
+            canvas.drawRRect(
+              rrect,
+              Paint()
+                ..color = _editorTheme['root']?.backgroundColor ?? Colors.transparent
+                ..style = PaintingStyle.fill
+            );
+
+            canvas.drawRRect(
+              rrect,
+              Paint()
+                ..color = _editorTheme['root']?.color ?? Colors.grey
+                ..style = PaintingStyle.stroke
+            );
+           
+            zoomPainter.paint(
+              canvas,
+              Offset(zoomBoxX + 8, zoomBoxY + 6),
+            );
+          }
+        }
+      }
+    }
+    canvas.restore();
+  }
+  
+  @override
+  void describeSemanticsConfiguration(SemanticsConfiguration config) {
+    super.describeSemanticsConfiguration(config);
+  }
+
+  void _ensureCaretVisible() {
+    final caretX = _carretOffset.dx + _gutterWidth + (_innerPadding?.horizontal ?? 0);
+    final caretY = _carretOffset.dy + (_innerPadding?.vertical ?? 0);
+    final vScrollOffset = _vscrollController.offset;
+    final hScrollOffset = _hscrollController.offset;
+    final viewportHeight = _vscrollController.position.viewportDimension;
+    final viewportWidth = _hscrollController.position.viewportDimension;
+
+    if (caretY > 0 && caretY <= vScrollOffset + (_innerPadding?.vertical ?? 0)) {
+      _vscrollController.animateTo(
+        caretY - (_innerPadding?.vertical ?? 0),
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    } else if (caretY + _caretHeight >= vScrollOffset + viewportHeight) {
+      _vscrollController.animateTo(
+        caretY + _caretHeight - viewportHeight + (_innerPadding?.vertical ?? 0),
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    }
+
+    if (caretX < hScrollOffset + (_innerPadding?.horizontal ?? 0) + _gutterWidth) {
+      _hscrollController.animateTo(
+        caretX - (_innerPadding?.horizontal ?? 0) - _gutterWidth,
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    } else if (caretX + 1.5 > hScrollOffset + viewportWidth) {
+      _hscrollController.animateTo(
+        caretX + 1.5 - viewportWidth + (_innerPadding?.horizontal ?? 0) + _gutterWidth,
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+  
+  @override
+  MouseCursor get cursor {
+    final localPosition = _currerntPosition;
+    if (localPosition.dx >= 0 && localPosition.dx < _gutterWidth) {
+      for(final fold in _foldRanges){
+        final iconRect = Rect.fromLTWH(
+          _gutterWidth - (_textStyle?.fontSize ?? 15) + (_innerPadding?.left ?? 0),
+          _lineTops[fold.startIndex] + (_innerPadding?.top ?? 0) - _vscrollController.offset,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+        );
+        if(iconRect.contains(_currerntPosition)){
+          return SystemMouseCursors.click;
+        }
+      }
+      return MouseCursor.defer;
+    }
+    return SystemMouseCursors.text;
+  }
+  
+  @override
+  PointerEnterEventListener? get onEnter => (event){};
+  
+  @override
+  PointerExitEventListener? get onExit => (event){};
+  
+  @override
+  bool get validForMouseTracker => true;
+}
+
+class _BackspaceNotifier extends ChangeNotifier {
+  int? _lineIndex;
+  String _lineText = '';
+  int? _caretInLine;
+  Offset? _caretOffset;
+
+  void setEdit({required int lineIndex, required String lineText, required int caretInLine, Offset? caretOffset}) {
+    _lineIndex = lineIndex;
+    _lineText = lineText;
+    _caretInLine = caretInLine;
+    _caretOffset = caretOffset;
+    
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(const Duration(milliseconds: 16), () {
+      notifyListeners();
+    });
+  }
+
+  void clear() {
+    _lineIndex = null;
+    _lineText = '';
+    _caretInLine = null;
+    _caretOffset = null;
+    _debounceTimer?.cancel();
+    notifyListeners();
+  }
+
+  Timer? _debounceTimer;
+
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    super.dispose();
+  }
+
+  int? get lineIndex => _lineIndex;
+  String get lineText => _lineText;
+  int? get caretInLine => _caretInLine;
+  Offset? get caretOffset => _caretOffset;
+}
+
+class _Pair { final int a, b; _Pair(this.a, this.b); }
+
+class FoldRange {
+  final int startIndex, endIndex;
+  bool isFolded = false;
+  List<FoldRange> originallyFoldedChildren = [];
+
+  FoldRange(this.startIndex, this.endIndex);
+  
+  void addOriginallyFoldedChild(FoldRange child) {
+    if (!originallyFoldedChildren.contains(child)) {
+      originallyFoldedChildren.add(child);
+    }
+  }
+  
+  void clearOriginallyFoldedChildren() {
+    originallyFoldedChildren.clear();
+  }
+  
+  bool containsLine(int line) {
+    return line > startIndex && line <= endIndex;
+  }
+}
+
+import 'dart:async';
+import 'dart:io';
+import 'dart:math';
+
+import 'code_content.dart';
+import 'scoll.dart';
+import 'controller.dart';
+import 'styling.dart';
+import '../LSP/lsp.dart';
+import '../AI_completion/ai.dart';
+
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:highlight/highlight.dart';
+import 'package:highlight/languages/python.dart';
+import 'package:flutter_highlight/themes/atom-one-dark.dart';
+import 'package:markdown_widget/config/configs.dart';
+import 'package:markdown_widget/widget/all.dart';
+
+part 'shortcuts.dart';
+
+//FIXME: Backspace issue in mobile
+//TODO: Dynamic height for hover bo
+//TODO: set undo stack start index to 1
+//TODO: Preserve text in a bugger
+
+class CodeForge extends StatefulWidget{
+  final CodeForgeController? controller;
+  final Map<String, TextStyle>? editorTheme;
+  final Mode? language;
+  final FocusNode? focusNode;
+  final TextStyle? textStyle;
+  final AiCompletion? aiCompletion;
+  final LspConfig? lspConfig;
+  final EdgeInsets? innerPadding;
+  final ScrollController? verticalScrollController;
+  final ScrollController? horizontalScrollController;
+  final UndoHistoryController? undoHistoryController;
+  final CodeSelectionStyle? selectionStyle;
+  final GutterStyle? gutterStyle;
+  final SuggestionStyle? suggestionStyle;
+  final HoverDetailsStyle? hoverDetailsStyle;
+  final String? filePath;
+  final String? initialText;
+  final bool readOnly;
+  final bool lineWrap;
+  final bool autoFocus;
+  final bool enableFolding;
+  final bool enableGuideLines;
+  final bool enableSuggestions;
+  final bool enableGutterDivider;
+
+  const CodeForge({
+    super.key,
+    this.controller,
+    this.editorTheme,
+    this.language,
+    this.aiCompletion,
+    this.lspConfig,
+    this.filePath,
+    this.initialText,
+    this.focusNode,
+    this.verticalScrollController,
+    this.horizontalScrollController,
+    this.undoHistoryController,
+    this.textStyle,
+    this.innerPadding,
+    this.readOnly = false,
+    this.autoFocus = false,
+    this.lineWrap = false,
+    this.enableFolding = true,
+    this.enableGuideLines = true,
+    this.enableSuggestions = true,
+    this.enableGutterDivider = false,
+    this.selectionStyle,
+    this.gutterStyle,
+    this.suggestionStyle,
+    this.hoverDetailsStyle
+  });
+
+  @override
+  State<CodeForge> createState() => _CodeForgeState();
+}
+
+class _CodeForgeState extends State<CodeForge> {
+  late final ScrollController _vscrollController, _hscrollController;
+  late final CodeForgeController _controller;
+  late final UndoHistoryController _undoController;
+  late final FocusNode _focusNode;
+  late final Map<String, TextStyle> _editorTheme;
+  late final ValueNotifier<CodeContent> _contentNotifier;
+  late final ValueNotifier<bool> _selectionNotifier;
+  late final ValueNotifier<Offset> _offsetNotifier;
+  late final CodeContent _content;
+  late final Mode _language;
+  late final CodeSelectionStyle _selectionStyle;
+  late final GutterStyle _gutterStyle;
+  late final SuggestionStyle _suggestionStyle;
+  late final HoverDetailsStyle _hoverDetailsStyle;
+  final _isMobile = Platform.isAndroid || Platform.isIOS;
+  final _suggScrollController = ScrollController();
+  final _backspaceNotifier = _BackspaceNotifier();
+  final Map<int, String> _heldLineEdits = {}, _originalLineStates = {};
+  final Map<String, String> _cachedResponse = {};
+  final ValueNotifier<String?> _aiNotifier = ValueNotifier(null);
+  final ValueNotifier<Offset?> _aiOffsetNotifier = ValueNotifier(null);
+  final ValueNotifier<List<dynamic>?> _suggestionNotifier = ValueNotifier(null);
+  final ValueNotifier<List<dynamic>?> _hoverNotifier = ValueNotifier(null);
+  final ValueNotifier<List<LspErrors>> _diagnosticsNotifier = ValueNotifier([]);
+  final ValueNotifier<bool> _isHoveringPopup = ValueNotifier(false);
+  List<dynamic> _suggestions = [];
+  TextInputConnection? _connection;
+  int? _holdLocalLine, _holdLocalCaretInLine;
+  int _sugSelIndex = 0;
+  String? _holdLocalLineText;
+  Timer? _keypressTimer, _aiDebounceTimer;
+  bool _isHovered = false, _backspaceHeld = false, _isTyping = false;
+  bool _deleteHeld = false;
+  bool _lspReady = false;
+  TextEditingValue? _previousValue;
+
+  @override
+  void initState() {
+    _controller = widget.controller ?? CodeForgeController();
+    _vscrollController = widget.verticalScrollController ?? ScrollController();
+    _hscrollController = widget.horizontalScrollController ?? ScrollController();
+    _undoController = widget.undoHistoryController ?? UndoHistoryController();
+    _editorTheme = widget.editorTheme ?? atomOneDarkTheme;
+    _selectionStyle = widget.selectionStyle ?? CodeSelectionStyle();
+    _gutterStyle = widget.gutterStyle ?? GutterStyle(
+      lineNumberStyle: widget.textStyle ?? _editorTheme['root'],
+      foldedIconColor: _editorTheme['root']?.color,
+      unfoldedIconColor: _editorTheme['root']?.color,
+      backgroundColor: _editorTheme['root']?.backgroundColor
+    );
+    _suggestionStyle = widget.suggestionStyle ?? SuggestionStyle(
+      elevation: 6,
+      textStyle: ((){
+        TextStyle style = widget.textStyle ?? _editorTheme['root']!;
+        if(style.color == null){
+          style = style.copyWith(
+            color: _editorTheme['root']!.color
+          ); 
+        } 
+        return style;
+      })(),
+      backgroundColor: _editorTheme['root']!.backgroundColor!,
+      focusColor: Colors.blueAccent.withAlpha(50),
+      hoverColor: Colors.grey.withAlpha(15),
+      splashColor: Colors.blueAccent.withAlpha(50),
+      shape: BeveledRectangleBorder(
+        side: BorderSide(
+          color: _editorTheme['root']!.color ?? Colors.grey[400]!,
+          width: 0.2,
+        ),
+      ),
+    );
+
+    _hoverDetailsStyle = widget.hoverDetailsStyle ?? HoverDetailsStyle(
+      shape: BeveledRectangleBorder(
+        side: BorderSide(
+          color: _editorTheme['root']!.color ?? Colors.grey[400]!,
+          width: 0.2,
+        ),
+      ),
+      backgroundColor: _editorTheme['root']!.backgroundColor!,
+      focusColor: Colors.blueAccent.withAlpha(50),
+      hoverColor: Colors.grey.withAlpha(15),
+      splashColor: Colors.blueAccent.withAlpha(50),
+      textStyle: ((){
+        TextStyle style = widget.textStyle ?? _editorTheme['root']!;
+        if(style.color == null){
+          style = style.copyWith(
+            color: _editorTheme['root']!.color
+          ); 
+        } 
+        return style;
+      })(),
+    );
+
+    _language = widget.language ?? python;
+    _focusNode = widget.focusNode ?? FocusNode();
+    _connection = _controller.connection;
+    _content = CodeContent(controller: _controller);
+    _contentNotifier = ValueNotifier(_content);
+    _selectionNotifier = ValueNotifier(false);
+    _offsetNotifier = ValueNotifier(Offset(-1, -1));
+    _controller.manualAiCompletion = getManualAiSuggestion;
+    _controller.readOnly = widget.readOnly;
+
+    if(widget.autoFocus) _focusNode.requestFocus();
+
+    if(widget.lspConfig != null){
+       if(widget.initialText != null){
+        throw ArgumentError(
+          'Cannot provide both filePath and initialText to CodeForge.'
+        );
+      }
+      _controller.text = File(widget.filePath!).readAsStringSync();
+
+      if ((widget.lspConfig!.filePath != widget.filePath) || widget.filePath == null) {
+        throw Exception(
+          'File path in LspConfig does not match the provided filePath in CodeCrafter.',
+        );
+      }
+      
+      (() async {
+        try {
+          if (widget.lspConfig is LspSocketConfig) {
+            await (widget.lspConfig as LspSocketConfig).connect();
+          }
+          await widget.lspConfig!.initialize();
+          await Future.delayed(const Duration(milliseconds: 300));
+          await widget.lspConfig!.openDocument();
+          setState(() {
+            _lspReady = true;
+          });
+        } catch (e) {
+          debugPrint('Error initializing LSP: e');
+        }
+      })();
+
+      widget.lspConfig!.responses.listen((data){
+        if (data['method'] == 'textDocument/publishDiagnostics') {
+          final diagnostics = data['params']['diagnostics'] as List;
+          _diagnosticsNotifier.value.clear();
+          if (diagnostics.isNotEmpty) {
+            final List<LspErrors> errors = [];
+            for (final (item as Map<String, dynamic>) in diagnostics) {
+              errors.add(
+                LspErrors(
+                  severity: (() {
+                    if (item['severity'] == 1 &&
+                        widget.lspConfig!.disableError) {
+                      return 0;
+                    }
+                    if (item['severity'] == 2 &&
+                        widget.lspConfig!.disableWarning) {
+                      return 0;
+                    }
+                    return item['severity'];
+                  })(),
+                  range: item['range'],
+                  message: item['message'],
+                ),
+              );
+            }
+            _diagnosticsNotifier.value = List.from(errors);
+          }
+        }
+      });
+    } else if(widget.initialText != null){
+      _controller.text = widget.initialText!;
+    }
+
+    _focusNode.addListener((){
+      if((_connection == null || !_connection!.attached) && !widget.readOnly){
+        _connection = TextInput.attach(
+          _controller,
+          TextInputConfiguration(
+            readOnly: widget.readOnly,
+            enableDeltaModel: !widget.readOnly,
+            inputType: TextInputType.multiline,
+            inputAction: TextInputAction.newline,
+            autocorrect: false
+        ));
+        _connection!.setEditingState(_controller.value);
+        _connection!.show();
+      }
+      _controller.refresh();
+    });
+
+    _controller.addListener((){
+      final text = _controller.text;
+      final lines = text.split('\n');
+      final line = lines.length - 1;
+      final cursorPosition = _controller.selection.extentOffset;
+      final prefix = _getCurrentWordPrefix(text, cursorPosition);
+      final character = lines.isNotEmpty ? lines.last.length : 0;
+      final currentValue = _controller.value;
+      final prevValue = _previousValue ?? currentValue;
+      _isTyping = false;
+
+      if(
+        currentValue.selection.extentOffset != prevValue.selection.extentOffset &&
+        currentValue.text == prevValue.text
+      ){
+        _suggestionNotifier.value = null;
+      } else if(_isMobile) {
+        _hoverNotifier.value = null;
+      }
+
+      
+
+      if(
+        widget.lspConfig != null && _lspReady &&
+        currentValue.text != prevValue.text
+      ){
+        (() async => await widget.lspConfig!.updateDocument(text))();
+      }
+
+      _contentNotifier.value = CodeContent(
+        controller: _controller,
+        textStyle: widget.textStyle
+      );
+      _aiDebounceTimer?.cancel();
+      
+      if(
+        widget.aiCompletion != null &&
+        _controller.selection.isValid &&
+        widget.aiCompletion!.enableCompletion
+      ){
+        
+        final text = _controller.text;
+        final cursorPosition = _controller.selection.extentOffset.clamp(0, text.length);
+        final textAfterCursor = text.substring(cursorPosition);        
+        if(cursorPosition <= 0) return;
+        bool lineEnd = textAfterCursor.isEmpty ||
+              textAfterCursor.startsWith('\n') ||
+              textAfterCursor.trim().isEmpty;
+        if(!lineEnd) return;
+        final codeToSend = "{text.substring(0, cursorPosition)}<|CURSOR|>{text.substring(cursorPosition)}";
+        if(
+          widget.aiCompletion!.completionType == CompletionType.auto ||
+          widget.aiCompletion!.completionType == CompletionType.mixed
+        ){
+          _aiDebounceTimer = Timer(
+            Duration(milliseconds: widget.aiCompletion!.debounceTime),
+            () async{
+              _aiNotifier.value = await _getCachedResponse(codeToSend);
+            }
+          );
+        }
+      }
+
+      if (currentValue.text.length == prevValue.text.length + 1 &&
+          currentValue.selection.baseOffset == prevValue.selection.baseOffset + 1
+        ) {
+        final insertedChar = currentValue.text.substring(
+          prevValue.selection.baseOffset,
+          currentValue.selection.baseOffset,
+        );
+        _isTyping =
+            insertedChar.isNotEmpty &&
+            RegExp(r'[a-zA-Z]').hasMatch(insertedChar);
+        if(
+          widget.enableSuggestions &&
+          _isTyping &&
+          prefix.isNotEmpty &&
+          _controller.selection.extentOffset > 0
+        ){
+          if(widget.lspConfig == null){
+            final regExp = RegExp(r'\b\w+\b');
+            final List<String> words = regExp
+              .allMatches(text)
+              .map((m) => m.group(0)!)
+              .toList();
+            String currentWord = '';
+            if(text.isNotEmpty){
+              final match = RegExp(r'\w+').firstMatch(text);
+              if (match != null) {
+                currentWord = match.group(0)!;
+              }
+            }
+            _suggestions.clear();
+            for(final i in words){
+              if(!_suggestions.contains(i) && i != currentWord) {
+                _suggestions.add(i);
+              }
+            }
+            if(prefix.isNotEmpty){
+              _suggestions = _suggestions
+                .where((s) => s.startsWith(prefix))
+                .toList();
+            }
+          } else if(_lspReady){
+              final lspConfig = widget.lspConfig!;
+              (() async{
+                final suggestion = await lspConfig.getCompletions(
+                  line,
+                  character
+                ); 
+                _suggestions = suggestion;
+              })();
+          }
+          _sortSuggestions(prefix);
+          final triggerChar = text[cursorPosition - 1];
+          if (!RegExp(r'[a-zA-Z]').hasMatch(triggerChar)) {
+              _suggestionNotifier.value = null;
+              return;
+          }
+          if (mounted && _suggestions.isNotEmpty) {
+            _sugSelIndex = 0;
+            _suggestionNotifier.value = _suggestions;
+          }
+        } else {
+          _suggestionNotifier.value = null; 
+        }
+      }
+      _previousValue = currentValue;
+
+    });
+    
+    WidgetsBinding.instance.addPostFrameCallback((_){
+      if(_vscrollController.hasClients) _vscrollController.jumpTo(0);
+      if(_hscrollController.hasClients) _hscrollController.jumpTo(0);
+      _controller.refresh();
+    });
+    super.initState();
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    _connection?.close();
+    _controller.dispose();
+    _contentNotifier.dispose();
+    _hscrollController.dispose();
+    _vscrollController.dispose();
+    super.dispose();
+  }
+
+  Map<String,int> _lineInfoAtGlobalOffset(int globalOffset) {
+    final lines = _controller.text.split('\n');
+    int accum = 0;
+    for (int i = 0; i < lines.length; i++) {
+      final lineLen = lines[i].length;
+      if (globalOffset >= accum && globalOffset <= accum + lineLen) {
+        return {'line': i, 'lineStart': accum, 'inLine': globalOffset - accum};
+      }
+      accum += lineLen + 1;
+    }
+    final last = max(0, lines.length - 1);
+    final lastStart = accum - (lines.isNotEmpty ? (lines.last.length + 1) : 0);
+    return {'line': last, 'lineStart': lastStart, 'inLine': lines.isNotEmpty ? lines.last.length : 0};
+  }
+  
+  void _commitHeldDeleteToController() {
+    if (!_deleteHeld) return;
+    if (_holdLocalLineText != null && _holdLocalLine != null) {
+      final currentText = _controller.text;
+      final lines = currentText.split('\n');
+      
+      if (_holdLocalLine! < lines.length) {
+        lines[_holdLocalLine!] = _holdLocalLineText!;
+        final newText = lines.join('\n');
+        final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + (_holdLocalCaretInLine ?? 0);
+        
+        _controller.value = _controller.value.copyWith(
+          text: newText,
+          selection: TextSelection.collapsed(offset: newCaret),
+        );
+      }
+    }
+    
+    _backspaceNotifier.clear();
+    _resetDeleteState();
+    _commonF(_controller);
+  }
+  
+  void _resetDeleteState() {
+    _holdLocalLine = null;
+    _holdLocalCaretInLine = null;
+    _holdLocalLineText = null;
+    _deleteHeld = false;
+    _heldLineEdits.clear();
+    _originalLineStates.clear();
+  }
+  
+  void _syncAndMoveToNextLine() {
+    final currentText = _controller.text;
+    final lines = currentText.split('\n');
+    
+    if (_holdLocalLine != null &&
+        _holdLocalLine! < lines.length - 1) {
+      final nextLineIndex = _holdLocalLine! + 1;
+      final currentLineText = _holdLocalLineText ?? lines[_holdLocalLine!];
+      final nextLineText = lines[nextLineIndex];
+  
+      final merged = currentLineText + nextLineText;
+      lines[_holdLocalLine!] = merged;
+      lines.removeAt(nextLineIndex);
+  
+      final newText = lines.join('\n');
+      final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + currentLineText.length;
+  
+      _controller.value = _controller.value.copyWith(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newCaret),
+      );
+  
+      _holdLocalLineText = merged;
+      _holdLocalCaretInLine = currentLineText.length;
+  
+      _backspaceNotifier.clear();
+      _controller.refresh();
+    }
+  }
+  
+  void _commitHeldBackspaceToController() {
+    if (!_backspaceHeld) return;
+    if (_holdLocalLineText != null && _holdLocalLine != null) {
+      final currentText = _controller.text;
+      final lines = currentText.split('\n');
+      
+      if (_holdLocalLine! < lines.length) {
+        lines[_holdLocalLine!] = _holdLocalLineText!;
+        final newText = lines.join('\n');
+        final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + (_holdLocalCaretInLine ?? 0);
+        
+        _controller.value = _controller.value.copyWith(
+          text: newText,
+          selection: TextSelection.collapsed(offset: newCaret),
+        );
+      }
+    }
+    
+    _backspaceNotifier.clear();
+    _resetBackspaceState();
+    _commonF(_controller);
+  }
+
+  void _resetBackspaceState() {
+    _holdLocalLine = null;
+    _holdLocalCaretInLine = null;
+    _holdLocalLineText = null;
+    _backspaceHeld = false;
+    _deleteHeld = false;
+    _heldLineEdits.clear();
+    _originalLineStates.clear();
+  }
+
+  void _syncAndMoveToPreviousLine() {
+    final currentText = _controller.text;
+    final lines = currentText.split('\n');
+    if (_holdLocalLine != null &&
+        _holdLocalLine! > 0 &&
+        _holdLocalLine! < lines.length) {
+      final prevLineIndex = _holdLocalLine! - 1;
+      final currentLineText = _holdLocalLineText ?? lines[_holdLocalLine!];
+
+      final merged = lines[prevLineIndex] + currentLineText;
+      lines[prevLineIndex] = merged;
+      lines.removeAt(_holdLocalLine!);
+
+      final newText = lines.join('\n');
+      final newCaret = _lineStartGlobalOffset(prevLineIndex) + merged.length;
+
+      _controller.value = _controller.value.copyWith(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newCaret),
+      );
+
+      _holdLocalLine = prevLineIndex;
+      _holdLocalLineText = merged;
+      _holdLocalCaretInLine = merged.length;
+
+      _backspaceNotifier.clear();
+      _controller.refresh();
+    }
+  }
+
+  int _lineStartGlobalOffset(int lineIndex) {
+    final lines = _controller.text.split('\n');
+    int acc = 0;
+    for (int i = 0; i < lineIndex && i < lines.length; i++) {
+      acc += lines[i].length + 1;
+    }
+    return acc;
+  }
+
+  Future<String> _getCachedResponse(String codeToSend) async {
+    final String key = codeToSend.hashCode.toString();
+    if (_cachedResponse.containsKey(key)) {
+      return _cachedResponse[key]!;
+    }
+    final String aiResponse = await widget.aiCompletion!.model.completionResponse(codeToSend);
+    _cachedResponse[key] = aiResponse;
+    return aiResponse;
+  }
+
+  void _sortSuggestions(String prefix) {
+    _suggestions.sort((a, b) {
+      final aStartsWith = a is LspCompletion
+          ? a.label.toLowerCase().startsWith(prefix.toLowerCase())
+          : a.toLowerCase().startsWith(prefix.toLowerCase());
+      final bStartsWith = b is LspCompletion
+          ? b.label.toLowerCase().startsWith(prefix.toLowerCase())
+          : b.toLowerCase().startsWith(prefix.toLowerCase());
+      if (aStartsWith && !bStartsWith) return -1;
+      if (!aStartsWith && bStartsWith) return 1;
+
+      return a is LspCompletion ? b.label.compareTo(a.label) : b.compareTo(a);
+    });
+  }
+
+  Future<void> getManualAiSuggestion() async {
+    if (widget.aiCompletion?.completionType == CompletionType.manual ||
+        widget.aiCompletion?.completionType == CompletionType.mixed) {
+      final String text = _controller.text;
+      final int cursorPosition = _controller.selection.extentOffset;
+      final String codeToSend = "{text.substring(0, cursorPosition)}<|CURSOR|>{text.substring(cursorPosition)}";
+      _aiNotifier.value = await _getCachedResponse(codeToSend);
+    }
+  }
+
+  String _getCurrentWordPrefix(String text, int offset) {
+    final safeOffset = offset.clamp(0, text.length);
+    final beforeCursor = text.substring(0, safeOffset);
+    final match = RegExp(r'([a-zA-Z_][a-zA-Z0-9_]*)').firstMatch(beforeCursor);
+    return match?.group(0) ?? '';
+  }
+
+void _scrollSuggestionToIndex(int index) {
+  final itemHeight = (widget.textStyle?.fontSize ?? 14) + 6.5;
+  final scrollOffset = _suggScrollController.offset;
+  final viewHeight = 390.0;
+
+  final itemTop = index * itemHeight;
+  final itemBottom = itemTop + itemHeight;
+
+  if (itemTop < scrollOffset) {
+    _suggScrollController.animateTo(
+      itemTop,
+      duration: Duration(milliseconds: 120),
+      curve: Curves.easeInOut,
+    );
+  } else if (itemBottom > scrollOffset + viewHeight) {
+    _suggScrollController.animateTo(
+      itemBottom - viewHeight,
+      duration: Duration(milliseconds: 120),
+      curve: Curves.easeInOut,
+    );
+  }
+}
+
+  @override
+  Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final screenHeight = MediaQuery.of(context).size.height;
+    return LayoutBuilder(
+      builder: (_, constraints) {
+        return GestureDetector(
+          onTap: _focusNode.requestFocus,
+          child: CallbackShortcuts(
+            bindings: _getShortcuts(_controller, widget.readOnly),
+            child: Stack(
+              children: [
+                RawScrollbar(
+                  thumbColor: _editorTheme['root']!.color!.withAlpha(110),
+                  radius: Radius.circular(20),
+                  controller: _vscrollController,
+                  interactive: !_isMobile,
+                  thumbVisibility: _isHovered,
+                  child: RawScrollbar(
+                    thumbColor: _editorTheme['root']!.color!.withAlpha(110),
+                    radius: Radius.circular(20),
+                    controller: _hscrollController,
+                    thumbVisibility: _isHovered,
+                    interactive: !_isMobile,
+                    child: MouseRegion(
+                      onEnter: (event) => setState(() => _isHovered = true),
+                      onExit: (event) => setState(() => _isHovered = false),
+                      child: UndoHistory<TextEditingValue>(
+                        value: _controller,
+                        controller: _undoController,
+                        focusNode: _focusNode,
+                          onTriggered:(value) {
+                            _controller.value = value;
+                            _controller.refresh();
+                          },
+                        shouldChangeUndoStack: (oldValue, newValue) {
+                          if (!newValue.selection.isValid) {
+                            return false;
+                          }
+
+                          if (oldValue == null && 
+                              newValue.text.isEmpty && 
+                              newValue.selection.extentOffset <= 0) {
+                            return false;
+                          }
+                          
+                          if (oldValue != null && oldValue.text == newValue.text) {
+                            return false;
+                          }
+                
+                          return oldValue == null ||
+                            oldValue.text != newValue.text ||
+                            oldValue.composing != newValue.composing;
+                        },
+                        child: ValueListenableBuilder(
+                          valueListenable: _selectionNotifier,
+                          builder: (_, selectionValue, child) {
+                            return TwoDimensionalScrollable(
+                              verticalDetails: ScrollableDetails.vertical(
+                                controller: _vscrollController,
+                                physics: selectionValue ? NeverScrollableScrollPhysics() : ClampingScrollPhysics()
+                              ),
+                              horizontalDetails: ScrollableDetails.horizontal(
+                                controller: _hscrollController,
+                                physics: selectionValue ? NeverScrollableScrollPhysics() : ClampingScrollPhysics()
+                              ),
+                              viewportBuilder: (_, voffset, hoffset) {
+                                return CustomViewport(
+                                  verticalOffset: voffset,
+                                  horizontalOffset: hoffset,
+                                  mainAxis: Axis.vertical,
+                                  verticalAxisDirection: AxisDirection.down,
+                                  horizontalAxisDirection: AxisDirection.right,
+                                  delegate: TwoDimensionalChildBuilderDelegate(
+                                    maxXIndex: 0,
+                                    maxYIndex: 0,
+                                    builder: (_, vicinity){
+                                      return ValueListenableBuilder(
+                                        valueListenable: _contentNotifier,
+                                        builder: (_, value, child) {
+                                          final codeField = _CodeField(
+                                              context,
+                                              _editorTheme,
+                                              _language,
+                                              _controller,
+                                              _focusNode,
+                                              widget.textStyle,
+                                              widget.innerPadding,
+                                              _vscrollController,
+                                              _hscrollController,
+                                              widget.lineWrap,
+                                              widget.enableFolding,
+                                              widget.readOnly,
+                                              widget.enableGuideLines,
+                                              value,
+                                              _selectionStyle,
+                                              _gutterStyle,
+                                              _selectionNotifier,
+                                              _aiNotifier,
+                                              _aiOffsetNotifier,
+                                              _offsetNotifier,
+                                              _hoverNotifier,
+                                              _diagnosticsNotifier,
+                                              _isHoveringPopup,
+                                              _backspaceNotifier,
+                                              widget.enableGutterDivider
+                                            );
+                                          return SizedBox(
+                                            height: value.totalHeight + (widget.innerPadding?.vertical ?? 0),
+                                            width: widget.lineWrap 
+                                              ? constraints.maxWidth
+                                              : max(
+                                                  value.totalWidth + (widget.innerPadding?.horizontal ?? 0),
+                                                  constraints.maxWidth
+                                                ),
+                                            child:
+                                            KeyboardListener(
+                                              focusNode: _focusNode,
+                                              onKeyEvent: (event) {
+                                                final isShiftPressed = HardwareKeyboard.instance.isShiftPressed;
+                                                final isCtrlPressed = HardwareKeyboard.instance.isControlPressed;
+                                                if(isCtrlPressed) return;
+
+                                                if (event is KeyUpEvent) {
+                                                  if(event.logicalKey == LogicalKeyboardKey.backspace){
+                                                    _commitHeldBackspaceToController();
+                                                  } else if(event.logicalKey == LogicalKeyboardKey.delete){
+                                                    _commitHeldDeleteToController();
+                                                  }
+                                                  return;
+                                                }
+                                                
+                                                if(event is KeyDownEvent){
+                                                  if(event.logicalKey == LogicalKeyboardKey.escape){
+                                                    _suggestionNotifier.value = null;
+                                                    _aiOffsetNotifier.value = null;
+                                                    _offsetNotifier.value = Offset(-1, -1);
+                                                  }
+                                                  
+                                                  if(
+                                                    event.logicalKey == LogicalKeyboardKey.enter &&
+                                                    _controller.isShowingSuggestions &&
+                                                    !_isMobile
+                                                  ){
+                                                    final suggestion = _suggestionNotifier.value?[_sugSelIndex];
+                                                    if(suggestion != null){
+                                                      if(suggestion is String){
+                                                      _controller.insertAtCurrentCursor(suggestion, replaceTypedChar: true);
+                                                      } else if(suggestion is LspCompletion){
+                                                        _controller.insertAtCurrentCursor(suggestion.label, replaceTypedChar: true);
+                                                      }
+                                                    }
+                                                    _suggestionNotifier.value = null;  
+                                                  }
+                                                  
+                                                }
+
+                                                if(event is KeyDownEvent || event is KeyRepeatEvent){
+                                                  final currentSelection = _controller.selection;
+                                                  final currentText = _controller.text;
+                                                  switch (event.logicalKey) {
+                                                    case LogicalKeyboardKey.delete: 
+                                                      if(widget.readOnly) return;
+                                                      _suggestionNotifier.value = null;
+                                                      if(!currentSelection.isValid) return;
+                                                      if(
+                                                        (event is KeyDownEvent && 
+                                                        !currentSelection.isCollapsed) ||
+                                                        (currentText.substring(
+                                                          currentSelection.extentOffset,
+                                                          (currentSelection.extentOffset + 1).clamp(0, currentText.length))
+                                                        ) == '\n'
+                                                      ) {
+                                                        _controller.delete();
+                                                        return;
+                                                      }
+
+                                                      if (!_deleteHeld) {
+                                                        final info = _lineInfoAtGlobalOffset(currentSelection.extentOffset);
+                                                        _holdLocalLine = info['line'];
+                                                        _holdLocalCaretInLine = info['inLine'];
+                                                        final lines = currentText.split('\n');
+                                                        _holdLocalLineText = (0 <= _holdLocalLine! && _holdLocalLine! < lines.length) 
+                                                            ? lines[_holdLocalLine!] 
+                                                            : '';
+                                                        _deleteHeld = true;
+                                                        _heldLineEdits.clear();
+                                                      }
+
+                                                      if (_holdLocalLineText != null) {
+                                                        final caretIn = _holdLocalCaretInLine ?? 0;
+                                                        final lineText = _holdLocalLineText!;
+
+                                                        if (caretIn < lineText.length) {
+                                                          final before = lineText.substring(0, caretIn);
+                                                          final after = lineText.substring(caretIn + 1);
+                                                          _holdLocalLineText = before + after;
+                                                          
+                                                          Offset carretOffset = _content.caretOffset;
+                                                          final tempPainter = TextPainter(
+                                                            text: TextSpan(
+                                                              text: before,
+                                                              style: widget.textStyle ?? _editorTheme['root']
+                                                            ),
+                                                            textDirection: TextDirection.ltr
+                                                          );
+                                                          tempPainter.layout();
+                                                          carretOffset = Offset(tempPainter.width, carretOffset.dy);
+
+                                                          _backspaceNotifier.setEdit(
+                                                            lineIndex: _holdLocalLine!,
+                                                            lineText: _holdLocalLineText!,
+                                                            caretInLine: _holdLocalCaretInLine!,
+                                                            caretOffset: carretOffset
+                                                          );
+                                                        } else if (caretIn >= lineText.length) {
+                                                          final lines = _holdLocalLineText != null
+                                                            ? _holdLocalLineText!.split('\n')
+                                                            : [];
+                                                          if (_holdLocalLine != null && _holdLocalLine! < lines.length - 1) {
+                                                            _syncAndMoveToNextLine();
+                                                          }
+                                                        }
+                                                      }
+                                                      break;
+
+                                                    case LogicalKeyboardKey.backspace:
+                                                      if(widget.readOnly) return;
+                                                      _suggestionNotifier.value = null;
+                                                      if (!currentSelection.isValid) return;
+                                                      if(
+                                                        event is KeyDownEvent &&
+                                                        !currentSelection.isCollapsed
+                                                      ){
+                                                        _controller.backspace();
+                                                        _commonF(_controller);
+                                                        return;
+                                                      }
+                                                      if (!_backspaceHeld) {
+                                                        final info = _lineInfoAtGlobalOffset(currentSelection.extentOffset);
+                                                        _holdLocalLine = info['line'];
+                                                        _holdLocalCaretInLine = info['inLine'];
+                                                        final lines = currentText.split('\n');
+                                                        _holdLocalLineText = (0 <= _holdLocalLine! && _holdLocalLine! < lines.length) 
+                                                            ? lines[_holdLocalLine!] 
+                                                            : '';
+                                                        _backspaceHeld = true;
+                                                        _heldLineEdits.clear();
+                                                      }
+                        
+                                                      if (_holdLocalLineText != null) {
+                                                        final caretIn = _holdLocalCaretInLine ?? 0;
+                        
+                                                        if (caretIn > 0 && caretIn <= _holdLocalLineText!.length) {
+                                                          final before = _holdLocalLineText!.substring(0, caretIn - 1);
+                                                          final after = _holdLocalLineText!.substring(caretIn);
+                                                          _holdLocalLineText = before + after;
+                                                          _holdLocalCaretInLine = caretIn - 1;
+                                                          
+                                                          Offset carretOffset = _content.caretOffset;
+                                                          final tempPainter = TextPainter(
+                                                            text: TextSpan(
+                                                              text: before,
+                                                              style: widget.textStyle ?? _editorTheme['root']
+                                                            ),
+                                                            textDirection: TextDirection.ltr
+                                                          );
+                                                          tempPainter.layout();
+                                                          carretOffset = Offset(tempPainter.width, carretOffset.dy);
+                        
+                                                          _backspaceNotifier.setEdit(
+                                                            lineIndex: _holdLocalLine!,
+                                                            lineText: _holdLocalLineText!,
+                                                            caretInLine: _holdLocalCaretInLine!,
+                                                            caretOffset: carretOffset
+                                                          );
+                                                        } else if (caretIn == 0 && _holdLocalLine! > 0) {
+                                                          _syncAndMoveToPreviousLine();
+                                                        }
+                                                      }
+                                                      break;
+                                                    case LogicalKeyboardKey.arrowUp:
+                                                      if(isShiftPressed) break;
+                                                      if(_suggestionNotifier.value != null){
+                                                        setState(() {
+                                                          _sugSelIndex = (_sugSelIndex - 1) % (_suggestionNotifier.value?.length ?? 1);
+                                                          _scrollSuggestionToIndex(_sugSelIndex);
+                                                        });
+                                                        return;
+                                                      }
+                                                      final textBeforeCursor = currentText.substring(0, currentSelection.extentOffset);
+                                                      final lines = textBeforeCursor.split('\n');
+                                                      if (lines.length > 1) {
+                                                        final currentLineStart = currentSelection.extentOffset - lines.last.length;
+                                                        final previousLineText = lines[lines.length - 2];
+                                                        final newOffset = currentLineStart - previousLineText.length - 1;
+                                                        
+                                                        final targetPosition = min(currentSelection.extentOffset - currentLineStart, previousLineText.length);
+                                                        final newCursorPosition = newOffset + targetPosition;
+                                                        
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: newCursorPosition)
+                                                        );
+                                                      } else if (currentSelection.extentOffset > 0) {
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: 0)
+                                                        );
+                                                      }
+                                                      break;
+                                    
+                                                    case LogicalKeyboardKey.arrowDown:
+                                                      if(isShiftPressed) break;
+                                                      if(_suggestionNotifier.value != null){
+                                                        setState(() {
+                                                          _sugSelIndex = (_sugSelIndex + 1) % (_suggestionNotifier.value?.length ?? 1);
+                                                          _scrollSuggestionToIndex(_sugSelIndex);
+                                                        });
+                                                        return;
+                                                      }
+                                                      final lines = currentText.split('\n');
+                                                      int caret = currentSelection.extentOffset;
+                                                      int charCount = 0;
+                                                      int currentLine = 0;
+                                                      for (int i = 0; i < lines.length; i++) {
+                                                        if (caret <= charCount + lines[i].length) {
+                                                          currentLine = i;
+                                                          break;
+                                                        }
+                                                        charCount += lines[i].length + 1;
+                                                      }
+                                                      final currentLineStart = charCount;
+                                                      final horizontalPosition = caret - currentLineStart;
+                                                      if (currentLine < lines.length - 1) {
+                                                        final nextLineText = lines[currentLine + 1];
+                                                        final targetPosition = min(horizontalPosition, nextLineText.length);
+                                                        final newCursorPosition = currentLineStart + lines[currentLine].length + 1 + targetPosition;
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: min(newCursorPosition, currentText.length))
+                                                        );
+                                                      } else {
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: currentText.length)
+                                                        );
+                                                      }
+                                                      break;
+                                    
+                                                    case LogicalKeyboardKey.arrowLeft:
+                                                      if(isShiftPressed) break;
+                                                      _suggestionNotifier.value = null;
+                                                      if(currentSelection.extentOffset > 0 && currentText.isNotEmpty){
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(
+                                                            offset: currentSelection.extentOffset - 1
+                                                          )
+                                                        );
+                                                      }
+                                                      break;
+                                                      
+                                                    case LogicalKeyboardKey.arrowRight:
+                                                      if(isShiftPressed) break;
+                                                      _suggestionNotifier.value = null;
+                                                      if(_aiNotifier.value != null){
+                                                        _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                                                        _aiNotifier.value = null;
+                                                        _aiOffsetNotifier.value = null;
+                                                        break;
+                                                      }
+                                                      if(currentText.isNotEmpty && currentSelection.extentOffset < currentText.length){
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(
+                                                            offset: currentSelection.extentOffset + 1
+                                                          )
+                                                        );
+                                                      }
+                                                      break;
+
+                                                    case LogicalKeyboardKey.tab:
+                                                      if(_aiNotifier.value != null){
+                                                        _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                                                        _aiNotifier.value = null;
+                                                        _aiOffsetNotifier.value = null;
+                                                      }
+                                                      break;
+                                                  }
+                                                }
+                                                
+                                                if(event.logicalKey != LogicalKeyboardKey.backspace){
+                                                  if(event is KeyDownEvent){
+                                                    _commonF(_controller);
+                                                  } else if(event is KeyRepeatEvent){
+                                                    _keypressTimer?.cancel();
+                                                    Timer(Duration(milliseconds: 5), ()=> _controller.refresh());
+                                                    _keypressTimer = Timer(Duration(milliseconds: 50), () {
+                                                      if(_connection == null || !_connection!.attached){
+                                                        _connection = TextInput.attach(
+                                                          _controller,
+                                                          TextInputConfiguration(
+                                                            enableDeltaModel: true,
+                                                            inputType: TextInputType.multiline,
+                                                            inputAction: TextInputAction.newline
+                                                        ));
+                                                        _connection!.show();
+                                                        _connection!.setEditingState(_controller.value);
+                                                      }
+                                                      else{
+                                                        _connection!.setEditingState(_controller.value);
+                                                      }
+                                                    });
+                                                  }
+                                                }
+                                              },
+                                              child: codeField
+                                            )
+                                          );
+                                        }
+                                      );
+                                    }
+                                  ),
+                                );
+                              }
+                            );
+                          }
+                        ),
+                      )
+                    ),
+                  ),
+                ),
+                ValueListenableBuilder<Offset?>(
+                  valueListenable: _aiOffsetNotifier,
+                  builder: (context, offvalue, child) {
+                    return _isMobile && _aiNotifier.value != null && offvalue != null && _aiNotifier.value!.isNotEmpty ? Positioned(
+                      top: offvalue.dy + (widget.textStyle?.fontSize ?? 14) * _aiNotifier.value!.split('\n').length + 15,
+                      left: offvalue.dx + (_aiNotifier.value!.split('\n')[0].length * (widget.textStyle?.fontSize ?? 14) / 2),
+                      child: Row(
+                        children: [
+                          InkWell(
+                            onTap: (){
+                              if(_aiNotifier.value == null) return;
+                              _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                              _aiNotifier.value = null;
+                              _aiOffsetNotifier.value = null;
+                            },
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: _editorTheme['root']?.backgroundColor,
+                                borderRadius: BorderRadius.all(Radius.circular(8)),
+                                border: BoxBorder.all(
+                                  width: 1.5,
+                                  color: Color(0xff64b5f6)
+                                )
+                              ),
+                              child: Icon(
+                                Icons.check,
+                                color: _editorTheme['root']?.color,
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            width: 30,
+                          ),
+                          InkWell(
+                            onTap: () {
+                              _aiNotifier.value = null;
+                              _aiOffsetNotifier.value = null;
+                            },
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: _editorTheme['root']?.backgroundColor,
+                                borderRadius: BorderRadius.all(Radius.circular(8)),
+                                border: BoxBorder.all(
+                                  width: 1.5,
+                                  color: Colors.red
+                                )
+                              ),
+                              child: Icon(
+                                Icons.close,
+                                color: _editorTheme['root']?.color,
+                              ),
+                            )
+                          )
+                        ],
+                      ),
+                    ) : SizedBox.shrink();
+                  }
+                ),
+                ValueListenableBuilder<Offset>(
+                  valueListenable: _offsetNotifier,
+                  builder: (_, pos, child){
+                    final toolbarStyle = TextStyle(color: Colors.grey[400]);
+                    final shortCutStyle = TextStyle(color: Colors.grey[600]);
+                    void copy() async {
+                      final selection = _controller.selection;
+                      final text = _controller.text;
+                      if (selection.isValid && !selection.isCollapsed) {
+                        final selectedText = text.substring(
+                          selection.start,
+                          selection.end,
+                        );
+                        Clipboard.setData(ClipboardData(text: selectedText));
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void paste() async{
+                      if(widget.readOnly) return;
+                      final data = await Clipboard.getData('text/plain');
+                      final pasteText = data?.text ?? '';
+                      if (pasteText.isNotEmpty) {
+                        final selection = _controller.selection;
+                        final text = _controller.text;
+                        final before = text.substring(0, selection.start);
+                        final after = text.substring(selection.end);
+                        final newText = before + pasteText + after;
+                        final newOffset = before.length + pasteText.length;
+                        _controller.value = _controller.value.copyWith(
+                          text: newText,
+                          selection: TextSelection.collapsed(offset: newOffset),
+                        );
+                        _commonF(_controller);
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void cut(){
+                      if(widget.readOnly) return;
+                      final selection = _controller.selection;
+                      final text = _controller.text;
+                      if (selection.isValid && !selection.isCollapsed) {
+                        final selectedText = text.substring(selection.start, selection.end);
+                        Clipboard.setData(ClipboardData(text: selectedText));
+                        final before = text.substring(0, selection.start);
+                        final after = text.substring(selection.end);
+                        final newText = before + after;
+                        _controller.value = _controller.value.copyWith(
+                          text: newText,
+                          selection: TextSelection.collapsed(offset: before.length),
+                        );
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void selectAll(){
+                      _controller.value = _controller.value.copyWith(
+                        selection: TextSelection(
+                          baseOffset: 0,
+                          extentOffset: _controller.text.length
+                        ),
+                      );
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    return pos.dx < 0 || pos.dy < 0 ? SizedBox.shrink() : _isMobile ? TextSelectionToolbar(
+                      anchorAbove: pos,
+                      anchorBelow: pos,
+                      children: [
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(left: 10),
+                          onPressed: copy,
+                          child: Text("Copy"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(left: 10),
+                          onPressed: paste,
+                          child: Text("Paste"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.zero,
+                          onPressed: cut,
+                          child: Text("Cut"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(right: 10),
+                          onPressed: selectAll,
+                          child: Text("SelectAll"),
+                        ),
+                      ]
+                    ) : Positioned(
+                      top: pos.dy,
+                      left: pos.dx,
+                      width: 200,
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: [
+                          Card(
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadiusGeometry.circular(5),
+                              side: BorderSide(
+                                color: _editorTheme['root']!.color ?? Colors.grey,
+                                width: 0.2
+                              )
+                            ),
+                            color: Color(0xff202020),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                ListTile(
+                                  dense: true,
+                                  onTap: copy,
+                                  title: Text("Copy"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + C"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                  shape: BeveledRectangleBorder(
+                                    borderRadius: BorderRadiusGeometry.vertical(
+                                      top: Radius.circular(3)
+                                    )
+                                  ),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: paste,
+                                  title: Text("Paste"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + V"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: cut,
+                                  title: Text("Cut"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + X"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: selectAll,
+                                  title: Text("SelectAll"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + A"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                  shape: BeveledRectangleBorder(
+                                    borderRadius: BorderRadiusGeometry.vertical(
+                                      bottom: Radius.circular(3)
+                                    )
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+                ),
+                ValueListenableBuilder(
+                  valueListenable: _suggestionNotifier,
+                  builder: (_, sugg, child){
+                    if(sugg == null) {
+                      _sugSelIndex = 0;
+                      _controller.isShowingSuggestions = false;
+                      return SizedBox.shrink();
+                    }
+                    _controller.isShowingSuggestions = true;
+                    return Positioned(
+                      width: screenWidth < 700 ? screenWidth * 0.63 : screenWidth * 0.3,
+                      top: _contentNotifier.value.caretOffset.dy + (widget.textStyle?.fontSize ?? 14) + 10,
+                      left: _contentNotifier.value.caretOffset.dx + 50,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: 400,
+                          maxWidth: 400,
+                          minWidth: 70
+                        ),
+                        child: Card(
+                          shape: _suggestionStyle.shape,
+                          elevation: _suggestionStyle.elevation,
+                          color: _suggestionStyle.backgroundColor,
+                          margin: EdgeInsets.zero,
+                          child: RawScrollbar(
+                            thumbVisibility: true,
+                            thumbColor: _editorTheme['root']!.color!.withAlpha(80),
+                            controller: _suggScrollController,
+                            child: ListView.builder(
+                              itemExtent: (widget.textStyle?.fontSize ?? 14) + 6.5,
+                              controller: _suggScrollController,
+                              padding: EdgeInsets.all(6),
+                              shrinkWrap: true,
+                              itemCount: sugg.length,
+                              itemBuilder: (_, indx){
+                                final item = sugg[indx];
+                                return Container(
+                                  color: _sugSelIndex == indx ? Color(0xff024281) : Colors.transparent,
+                                  child: InkWell(
+                                    canRequestFocus: false,
+                                    hoverColor: _suggestionStyle.hoverColor,
+                                    focusColor: _suggestionStyle.focusColor,
+                                    splashColor: _suggestionStyle.splashColor,
+                                    onTap: () => setState(() {
+                                      _sugSelIndex = indx;
+                                      final text = item is LspCompletion ? item.label : item as String;
+                                      _controller.insertAtCurrentCursor(text, replaceTypedChar: true);
+                                      _suggestionNotifier.value = null;
+                                    }),
+                                    child: Row(
+                                      children: [
+                                        if(item is LspCompletion) ...[
+                                          item.icon,
+                                          const SizedBox(width: 10),
+                                          Text(
+                                            item.label,
+                                            style: _suggestionStyle.textStyle
+                                          )
+                                        ],
+                                        if(item is String) Text(
+                                          item,
+                                          style: _suggestionStyle.textStyle
+                                        )
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          )
+                        ),
+                      ),
+                    );
+                  }
+                ),
+                ValueListenableBuilder(
+                  valueListenable: _hoverNotifier,
+                  builder: (_, hov, c){
+                    if(hov == null || widget.lspConfig == null) return SizedBox.shrink();
+                    final Offset position = hov[0];
+                    final Map<String, int> lineChar = hov[1];
+                    final hoverScrollController = ScrollController();
+                    final width = _isMobile ? screenWidth * 0.63 : screenWidth * 0.3;
+                    final height = _isMobile ? screenHeight * 0.4 : 550.0;
+                    return Positioned(
+                      width: width,
+                      height: height,
+                      top: (screenHeight - position.dy) < 550 ? position.dy - height : position.dy,
+                      left: (screenWidth - position.dx) < width ? position.dx - width : position.dx,
+                      child: MouseRegion(
+                        onEnter: (_) => _isHoveringPopup.value = true,
+                        onExit: (_) => _isHoveringPopup.value = false,
+                        child: Card(
+                          color: _hoverDetailsStyle.backgroundColor,
+                          shape: _hoverDetailsStyle.shape,
+                          child: FutureBuilder<String>(
+                              future: (() async{
+                                final lspConfig = widget.lspConfig;
+                                final line = lineChar['line']!;
+                                final character = lineChar['character']!;
+                                final diagnostic = _diagnosticsNotifier.value.firstWhere(
+                                  (diag) {
+                                    final diagStartLine = diag.range['start']['line'] as int;
+                                    final diagEndLine = diag.range['end']['line'] as int;
+                                    final diagStartChar = diag.range['start']['character'] as int;
+                                    final diagEndChar = diag.range['end']['character'] as int;
+                                    
+                                    if (line < diagStartLine || line > diagEndLine) {
+                                      return false;
+                                    }
+                                    
+                                    if (line == diagStartLine && line == diagEndLine) {
+                                      return character >= diagStartChar && character < diagEndChar;
+                                    } else if (line == diagStartLine) {
+                                      return character >= diagStartChar;
+                                    } else if (line == diagEndLine) {
+                                      return character < diagEndChar;
+                                    } else {
+                                      return true;
+                                    }
+                                  },
+                                  orElse: () => LspErrors(severity: 0, range: {}, message: ''),
+                                );
+                        
+                                if(diagnostic.message.isNotEmpty){
+                                  return diagnostic.message;
+                                }
+                        
+                                if(lspConfig != null){
+                                  return await lspConfig.getHover(line, character);
+                                }
+                        
+                                final hoverDetails = await lspConfig!.getHover(line, character);
+                                return hoverDetails;
+                              })(),
+                              builder: (_, snapShot) {
+                                if (snapShot.hasError) {
+                                  return SizedBox.shrink();
+                                }
+                                final data = snapShot.data;
+                                if (data == null || data.isEmpty) {
+                                  return SizedBox.shrink();
+                                }
+                                if (snapShot.connectionState == ConnectionState.waiting) {
+                                  return Text(
+                                    "Loading...",
+                                    style: _hoverDetailsStyle.textStyle,
+                                  );
+                                }
+                                return Padding(
+                                  padding: const EdgeInsets.all(8.0),
+                                  child: RawScrollbar(
+                                    controller: hoverScrollController,
+                                    thumbVisibility: true,
+                                    thumbColor: _editorTheme['root']!.color!.withAlpha(100),
+                                    child: SingleChildScrollView(
+                                      controller: hoverScrollController,
+                                      child: MarkdownBlock(
+                                        data: data,
+                                        config: MarkdownConfig.darkConfig.copy(
+                                          configs: [
+                                            PConfig(
+                                              textStyle: _hoverDetailsStyle.textStyle
+                                            ),
+                                            PreConfig(
+                                              language: widget.lspConfig?.languageId ?? "dart",
+                                              theme: _editorTheme,
+                                              textStyle: TextStyle(
+                                                fontSize: _hoverDetailsStyle.textStyle.fontSize
+                                              ),
+                                              styleNotMatched: TextStyle(
+                                                color: _editorTheme['root']!.color
+                                              ),
+                                              decoration: BoxDecoration(
+                                                borderRadius: BorderRadius.zero,
+                                                border: Border.all(
+                                                  width: 0.2,
+                                                  color: _editorTheme['root']!.color ?? Colors.grey
+                                                )
+                                              )
+                                            )
+                                          ]
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+                            ),
+                        ),
+                      ),
+                    );
+                  }
+                )
+              ],
+            ),
+          ),
+        );
+      }
+    );
+  }
+}
+
+class _CodeField extends LeafRenderObjectWidget{
+  final BuildContext context;
+  final Map<String, TextStyle> editorTheme;
+  final Mode languade;
+  final CodeForgeController controller;
+  final FocusNode focusNode;
+  final CodeSelectionStyle selectionStyle;
+  final GutterStyle gutterStyle;
+  final TextStyle? textStyle;
+  final EdgeInsets? innerPadding;
+  final ScrollController hscrollController, vscrollController;
+  final bool lineWrap, enableFolding, enableGuideLines, readOnly;
+  final CodeContent? codeContent;
+  final ValueNotifier<bool> selectionNotifier;
+  final ValueNotifier<Offset> offsetNotifier;
+  final ValueNotifier<String?> aiNotifier;
+  final ValueNotifier<Offset?> aiOffsetNotifier;
+  final ValueNotifier<List<dynamic>?> hoverNotifier;
+  final ValueNotifier<List<LspErrors>> diagnosticsNotifier;
+  final ValueNotifier<bool> isHoveringPopup;
+  final _BackspaceNotifier backspaceNotifier;
+  final bool enableGutterDivider;
+
+  const _CodeField(
+    this.context,
+    this.editorTheme,
+    this.languade,
+    this.controller,
+    this.focusNode,
+    this.textStyle,
+    this.innerPadding,
+    this.vscrollController,
+    this.hscrollController,
+    this.lineWrap,
+    this.enableFolding,
+    this.readOnly,
+    this.enableGuideLines,
+    this.codeContent,
+    this.selectionStyle,
+    this.gutterStyle,
+    this.selectionNotifier,
+    this.aiNotifier,
+    this.aiOffsetNotifier,
+    this.offsetNotifier,
+    this.hoverNotifier,
+    this.diagnosticsNotifier,
+    this.isHoveringPopup,
+    this.backspaceNotifier,
+    this.enableGutterDivider
+  );
+
+  @override
+  RenderObject createRenderObject(BuildContext context) {
+    return _CodeFieldRenderer(
+      controller: controller,
+      editorTheme: editorTheme,
+      language: languade,
+      focusNode: focusNode,
+      textStyle: textStyle,
+      innerPadding: innerPadding,
+      vscrollController: vscrollController,
+      hscrollController: hscrollController,
+      lineWrap: lineWrap,
+      enableFolding: enableFolding,
+      enableGuideLines: enableGuideLines,
+      readOnly: readOnly,
+      codeContent: codeContent,
+      selectionStyle: selectionStyle,
+      gutterStyle: gutterStyle,
+      selectionNotifier: selectionNotifier,
+      aiNotifier: aiNotifier,
+      aiOffsetNotifier: aiOffsetNotifier,
+      offsetNotifier: offsetNotifier,
+      hoverNotifier: hoverNotifier,
+      diagnosticsNotifier: diagnosticsNotifier,
+      isHoveringPopup: isHoveringPopup,
+      backspaceNotifier: backspaceNotifier,
+      enableGutterDivider: enableGutterDivider
+    );
+  }
+
+  @override
+  void updateRenderObject(BuildContext context, covariant _CodeFieldRenderer renderObject) {
+    renderObject
+      .._controller = controller
+      ..editorTheme = editorTheme
+      ..language = languade
+      ..textStyle = textStyle
+      ..lineWrap = lineWrap
+      ..enableFolding = enableFolding
+      ..enableGuideLines = enableGuideLines
+      ..codeContent = codeContent
+      ..selectionStyle = selectionStyle
+      ..gutterStyle = gutterStyle
+      ..readOnly = readOnly
+      ..innerPadding = innerPadding;
+  }
+}
+
+class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation{
+  late TextPainter tp;
+  late Mode _language;
+  late double _caretHeight = 0.0;
+  late String _langId;
+  late double _gutterWidth;
+  late final bool _enableGutterDivider;
+  late final Paint _caretPainter;
+  late final CodeSelectionStyle _selectionStyle;
+  late final GutterStyle _gutterStyle;
+  late final ValueNotifier<bool> _selectionNotifier;
+  late final ValueNotifier<String?> _aiNotifier;
+  late final ValueNotifier<Offset?> _aiOffsetNotifier;
+  late final ValueNotifier<Offset> _offsetNotifier;
+  late final ValueNotifier<List<dynamic>?> _hoverNotifier;
+  late final ValueNotifier<List<LspErrors>> _diagnosticsNotifier;
+  late final TextPainter _tempTp;
+  final ValueNotifier<bool> _isHoveringPopup;
+  final List<double> _lineTops = [], _lineHeights = [];
+  final Map<int, List<InlineSpan>> _cachedSpans  =  {};
+  final Map<int, TextPainter> _lineTpCache = {};
+  final Map<int, String> _inFlightEdits = {};
+  final _dtap = DoubleTapGestureRecognizer();
+  final _oneTap = TapGestureRecognizer();
+  final FocusNode _focusNode;
+  final ScrollController _vscrollController, _hscrollController;
+  final bool isMobile = Platform.isAndroid || Platform.isIOS;
+  Offset _currerntPosition = Offset.zero;
+  bool _draggingStartHandle = false, _draggingEndHandle = false, _lineWrap;
+  bool _enableFolding, _enableGuideLines,  _draggingCHandle = false;
+  bool _showCaret = true, _showBubble = false, _readOnly = false;
+  List<String> _lines = [];
+  List<_Pair> _cachedBracketPairs = [];
+  List<FoldRange> _foldRanges = [];
+  List<LspErrors> _diagnostics = [];
+  CodeForgeController _controller;
+  Map<String, TextStyle> _editorTheme;
+  Offset _carretOffset;
+  Timer? _caretTimer;
+  TextStyle? _textStyle;
+  EdgeInsets? _innerPadding;
+  CodeContent? _codeContent;
+  TextSelection? _lastSelection, _lastSelectionForAi;
+  Rect? _startHandleRect, _endHandleRect, _normalHandle;
+  double _gutterPadding = 0.0;
+  String? _aiResponse, _lastProcessedText;
+  TextEditingValue? _prevValue;
+
+  _CodeFieldRenderer({
+    required Map<String, TextStyle> editorTheme,
+    required Mode language,
+    required CodeForgeController controller,
+    required FocusNode focusNode,
+    required TextStyle? textStyle,
+    required EdgeInsets? innerPadding,
+    required ScrollController vscrollController,
+    required ScrollController hscrollController,
+    required bool lineWrap,
+    required bool enableFolding,
+    required bool enableGuideLines,
+    required bool readOnly,
+    required CodeContent? codeContent,
+    required CodeSelectionStyle selectionStyle,
+    required GutterStyle gutterStyle,
+    required ValueNotifier<bool> selectionNotifier,
+    required ValueNotifier<String?> aiNotifier,
+    required ValueNotifier<Offset?> aiOffsetNotifier,
+    required ValueNotifier<Offset> offsetNotifier,
+    required ValueNotifier<List<dynamic>?> hoverNotifier,
+    required ValueNotifier<List<LspErrors>> diagnosticsNotifier,
+    required ValueNotifier<bool> isHoveringPopup,
+    required _BackspaceNotifier backspaceNotifier,
+    required bool enableGutterDivider
+  }):_editorTheme = editorTheme,
+    _controller = controller,
+    _carretOffset = Offset(0, 0),
+    _focusNode = focusNode,
+    _textStyle = textStyle,
+    _innerPadding = innerPadding,
+    _vscrollController = vscrollController,
+    _hscrollController = hscrollController,
+    _lineWrap = lineWrap,
+    _enableFolding = enableFolding,
+    _enableGuideLines = enableGuideLines,
+    _readOnly = readOnly,
+    _codeContent = codeContent,
+    _language = language,
+    _selectionStyle = selectionStyle,
+    _gutterStyle = gutterStyle,
+    _selectionNotifier = selectionNotifier,
+    _aiNotifier = aiNotifier,
+    _aiOffsetNotifier = aiOffsetNotifier,
+    _offsetNotifier = offsetNotifier,
+    _hoverNotifier = hoverNotifier,
+    _diagnosticsNotifier = diagnosticsNotifier,
+    _isHoveringPopup = isHoveringPopup,
+    _enableGutterDivider = enableGutterDivider,
+    _caretPainter = Paint()
+      ..color = selectionStyle.cursorColor ?? editorTheme['root']!.color!
+      ..style = PaintingStyle.fill
+    {
+
+      _tempTp = TextPainter(
+        text: TextSpan(
+          text: "8", style: _textStyle ?? editorTheme['root']
+        ),
+        textDirection: TextDirection.ltr
+      );
+
+      _tempTp.layout();
+
+      _gutterPadding = _tempTp.width * 2;
+      _gutterWidth = _gutterStyle.gutterWidth ?? 0.0;
+
+      _vscrollController.addListener((){
+        _selectionTimer?.cancel();
+        markNeedsPaint();
+      });
+
+      _hscrollController.addListener((){
+        _selectionTimer?.cancel();
+        markNeedsPaint();
+      });
+
+      backspaceNotifier.addListener(() {
+        final idx = backspaceNotifier.lineIndex;
+        final text = backspaceNotifier.lineText;
+        _showCaret = true;
+        if (idx == null) {
+          _inFlightEdits.clear();
+        } else {
+          _inFlightEdits[idx] = text;
+        }
+        _carretOffset = Offset(
+          backspaceNotifier.caretOffset?.dx ?? _carretOffset.dx,
+          _lineTops[backspaceNotifier.lineIndex ?? 0]
+        );
+        if (idx != null) _cachedSpans.remove(idx);
+        markNeedsPaint();
+      });
+
+      _focusNode.addListener(markNeedsPaint);
+
+      String lastText = _controller.text;
+
+      _controller.addListener((){
+        final prevValue = _prevValue;
+        final currValue = _controller.value;
+        final newText = _controller.text;
+        final oldLines = lastText.split('\n');
+        final newLines = newText.split('\n');
+        final changedLines = _findChangedLines(oldLines, newLines);
+        _lines = newLines;
+        _cachedBracketPairs = _computeBracketPairs(newText);
+        
+        for (final i in changedLines) {
+          _cachedSpans.remove(i);
+        }
+        lastText = newText;
+
+        if (prevValue != null && 
+            currValue.text.length != prevValue.text.length &&
+            currValue.selection.isCollapsed) {
+          final cursorLine = _getLineAtOffset(currValue.selection.extentOffset);
+          _autoUnfoldOnEdit(cursorLine);
+        }
+
+        if (prevValue != null &&
+            currValue.selection.start != currValue.selection.end) {
+          final startLine = _getLineAtOffset(currValue.selection.start);
+          final endLine = _getLineAtOffset(currValue.selection.end);
+          _autoUnfoldOnSelection(startLine, endLine);
+        }
+
+        final oldFoldRanges = Map.fromEntries(
+          _foldRanges.map((f) => MapEntry('{f.startIndex}-{f.endIndex}', f))
+        );
+        final newFoldRanges = _getFoldRanges(_lines);
+
+        for (final newFold in newFoldRanges) {
+          final key = '{newFold.startIndex}-{newFold.endIndex}';
+          if (oldFoldRanges.containsKey(key)) {
+            final oldFold = oldFoldRanges[key]!;
+            newFold.isFolded = oldFold.isFolded;
+
+            for (final oldChild in oldFold.originallyFoldedChildren) {
+              final childKey = '{oldChild.startIndex}-{oldChild.endIndex}';
+              final matchingChild = newFoldRanges.firstWhere(
+                (f) => '{f.startIndex}-{f.endIndex}' == childKey,
+                orElse: () => FoldRange(-1, -1)
+              );
+              if (matchingChild.startIndex != -1 && 
+                  matchingChild.startIndex > newFold.startIndex && 
+                  matchingChild.endIndex <= newFold.endIndex) {
+                newFold.addOriginallyFoldedChild(matchingChild);
+              }
+            }
+          }
+        }
+        _foldRanges = newFoldRanges;
+        
+        _gutterWidth = _gutterStyle.gutterWidth ??
+          ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+        _showCaret = true;
+        _caretTimer?.cancel();
+        _caretTimer = Timer.periodic(Duration(milliseconds: 500),(timer) {
+          _showCaret = !_showCaret;
+          markNeedsPaint();
+        });
+
+        final cursorPosition = _controller.selection.extentOffset.clamp(0, _controller.text.length);
+        final textBeforeCursor = _controller.text.substring(0, cursorPosition);
+        final lastTypedChar = textBeforeCursor.isNotEmpty
+          ? textBeforeCursor[textBeforeCursor.length - 1].replaceAll("\n", '')
+          : '';
+          
+        if (_lastProcessedText == newText &&
+            _aiResponse != null &&
+            _aiResponse!.isNotEmpty &&
+            _lastSelectionForAi != _controller.selection)
+          {
+          _aiNotifier.value = null;
+          _aiOffsetNotifier.value = null;
+        }
+        _lastSelectionForAi = _controller.selection;
+
+        
+
+        if (_aiResponse != null && _aiResponse!.isNotEmpty && lastTypedChar.isNotEmpty) {
+          if (_aiResponse![0] == lastTypedChar) {
+            _aiResponse = _aiResponse!.substring(1);
+            if (_aiResponse!.isEmpty) {
+              _aiNotifier.value = null;
+              _aiOffsetNotifier.value = null;
+            }
+          } else {
+            _aiNotifier.value = null;
+            _aiOffsetNotifier.value = null;
+          }
+        }
+        
+        if(
+          currValue.text == prevValue?.text &&
+          currValue.selection.extentOffset != prevValue?.selection.extentOffset
+        ){
+            _showBubble = true;
+            return;
+        } else {
+          _showBubble = false;
+        }
+
+        _prevValue = currValue;
+
+        if (_lastProcessedText == newText) return;
+        _lastProcessedText = newText;
+      });
+
+      _aiNotifier.addListener((){
+        _aiResponse = _aiNotifier.value;
+        _aiOffsetNotifier.value = _codeContent?.caretOffset;
+        markNeedsLayout();
+        markNeedsPaint();
+      });
+
+      _langId = language.hashCode.toString();
+      highlight.registerLanguage(_langId, _language);
+
+      _diagnosticsNotifier.addListener((){
+        _diagnostics = _diagnosticsNotifier.value;
+      });
+  }
+
+  Map<String, TextStyle> get editorTheme => _editorTheme;
+
+  set codeContent(CodeContent? cc){
+    if(cc == null) return;
+    if(cc.hashCode == _codeContent.hashCode) return;
+    
+    _codeContent = cc;
+    tp = _codeContent?.tp ?? TextPainter(textDirection: TextDirection.ltr);
+    final tpWidth = _lineWrap
+        ? size.width - (_innerPadding?.left ?? 0) - (_innerPadding?.right ?? 0)
+        : double.infinity;
+    tp.layout(maxWidth: tpWidth);
+    _carretOffset = cc.caretOffset;
+    _caretHeight = tp.getFullHeightForCaret(
+      TextPosition(offset: cc.currentSelection.extentOffset),
+      Rect.zero
+    );
+
+    if (_lastSelection != _controller.selection) {
+      _lastSelection = _controller.selection;
+      markNeedsPaint();
+      _ensureCaretVisible();
+    }
+  }
+
+  set selectionStyle(CodeSelectionStyle selectionStyle){
+    if(identical(selectionStyle, _selectionStyle)) return;
+    _selectionStyle = selectionStyle;
+    markNeedsPaint();
+  }
+
+  set gutterStyle(GutterStyle gs){
+    if(identical(_gutterStyle, gs)) return;
+    _gutterStyle = _gutterStyle;
+    markNeedsPaint();
+  }
+
+  set enableFolding(bool fl){
+    if(_enableFolding == fl) return;
+    _enableFolding = fl;
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+  
+  set enableGuideLines(bool gl){
+    if(_enableGuideLines == gl) return;
+    _enableGuideLines = gl;
+    markNeedsPaint();
+  }
+
+  set lineWrap(bool lw){
+    if(lw == _lineWrap) return;
+    _lineWrap = lw;
+    markNeedsLayout();
+  }
+
+  set editorTheme(Map<String, TextStyle> et) {
+    if (identical(et, _editorTheme)) return;
+    _editorTheme = et;
+    
+    _tempTp.text = TextSpan(
+      text: "8", 
+      style: _textStyle ?? _editorTheme['root']
+    );
+    _tempTp.layout();
+    
+    _gutterPadding = _tempTp.width * 2;
+    _gutterWidth = _gutterStyle.gutterWidth ?? 
+      ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+    
+    _lineTpCache.clear();
+    _cachedSpans.clear();
+    
+    markNeedsLayout();
+  }
+
+  set language(Mode lang){
+    if(identical(lang, _language)) return;
+    _language = lang;
+    _langId = lang.hashCode.toString();
+    highlight.registerLanguage(_langId, lang);
+    markNeedsPaint();
+  }
+
+  set innerPadding(EdgeInsets? p){
+    if(identical(p, _innerPadding)) return;
+    _innerPadding = p;
+    markNeedsLayout();
+  }
+
+  set readOnly(bool ro) {
+    if (_readOnly == ro) return;
+    _readOnly = ro;
+    
+    // Close text input connection when readonly
+    if (_readOnly && _controller.connection != null) {
+      _controller.connection?.close();
+      _controller.connection = null;
+    }
+    
+    markNeedsPaint();
+  }
+
+  set textStyle(TextStyle? ts){
+      if(identical(ts, _textStyle)) return;
+      _textStyle = ts;
+      
+      _tempTp.text = TextSpan(
+        text: "8", 
+        style: _textStyle ?? _editorTheme['root']
+      );
+      _tempTp.layout();
+      
+      _gutterPadding = _tempTp.width * 2;
+      _gutterWidth = _gutterStyle.gutterWidth ?? 
+        ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+      
+      _lineTpCache.clear();
+      _cachedSpans.clear();
+      
+      markNeedsLayout();
+      markNeedsPaint();
+    }
+
+  List<int> _findChangedLines(List<String> oldLines, List<String> newLines) {
+    final changed = <int>[];
+    final maxLen = max(oldLines.length, newLines.length);
+    for (int i = 0; i < maxLen; i++) {
+      final oldLine = i < oldLines.length ? oldLines[i] : '';
+      final newLine = i < newLines.length ? newLines[i] : '';
+      if (oldLine != newLine) {
+        changed.add(i);
+      }
+    }
+    return changed;
+  }
+
+  List<TextSpan> _convert(
+    List<Node> nodes, [
+    int startOffset = 0,
+  ]) {
+    List<TextSpan> spans = [];
+    int offset = startOffset;
+
+    for (final node in nodes) {
+      if (node.value != null) {
+        final nodeLines = node.value!.split('\n');
+        for (int lineIdx = 0; lineIdx < nodeLines.length; lineIdx++) {
+          final line = nodeLines[lineIdx];
+          if (line.isNotEmpty) {
+            spans.add(TextSpan(
+              text: line,
+              style: editorTheme[node.className ?? ''],
+            ));
+          }
+          if (lineIdx != nodeLines.length - 1) {
+            spans.add(const TextSpan(text: '\n'));
+          }
+        }
+        offset += node.value!.length;
+      } else if (node.children != null) {
+        final inner = _convert(node.children!, offset);
+        spans.add(TextSpan(
+          children: inner,
+          style: editorTheme[node.className ?? ''],
+        ));
+        offset += _textLengthFromSpans(inner);
+      }
+    }
+
+    return spans;
+  }
+
+  int _textLengthFromSpans(List<InlineSpan> spans) {
+    int length = 0;
+    for (final span in spans) {
+      if (span is TextSpan && span.text != null) {
+        length += span.text!.length;
+      }
+      if (span is TextSpan && span.children != null) {
+        length += _textLengthFromSpans(span.children!);
+      }
+    }
+    return length;
+  }
+
+  List<InlineSpan> _applyBracketHighlight(
+    List<InlineSpan> spans,
+    int lineStart,
+    int? b1,
+    int? b2,
+    Set<int> unmatched,
+  ) {
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+
+        if (text != null) {
+          bool needsHighlighting = false;
+          for (int i = 0; i < text.length; i++) {
+            final globalIdx = offset + i;
+            if (unmatched.contains(globalIdx) || globalIdx == b1 || globalIdx == b2) {
+              needsHighlighting = true;
+              break;
+            }
+          }
+
+          if (needsHighlighting) {
+            List<TextSpan> charSpans = [];
+            for (int i = 0; i < text.length; i++) {
+              final globalIdx = offset + i;
+              TextStyle? charStyle = span.style;
+
+              if (unmatched.contains(globalIdx)) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  color: Colors.red,
+                  decoration: TextDecoration.underline,
+                  decorationStyle: TextDecorationStyle.wavy,
+                );
+              } else if (globalIdx == b1 || globalIdx == b2) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  background: Paint()
+                    ..style = PaintingStyle.stroke
+                    ..strokeWidth = 1.2
+                    ..color = editorTheme['root']?.color ?? Colors.white,
+                );
+              }
+
+              charSpans.add(TextSpan(text: text[i], style: charStyle));
+            }
+            result.add(TextSpan(children: charSpans));
+          } else {
+            result.add(span);
+          }
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applyBracketHighlight(children, offset, b1, b2, unmatched);
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += _textLengthFromSpans(childSpans);
+        }
+      }
+    }
+    return result;
+  }
+  
+  List<InlineSpan> _applyDiagnosticsStyling(
+    List<InlineSpan> spans,
+    int lineIndex,
+    int lineStart,
+  ) {
+    if (_diagnostics.isEmpty) return spans;
+    
+    final lineDiagnostics = _diagnostics.where((diag) {
+      final startLine = diag.range['start']['line'] as int;
+      final endLine = diag.range['end']['line'] as int;
+      return lineIndex >= startLine && lineIndex <= endLine;
+    }).toList();
+    
+    if (lineDiagnostics.isEmpty) return spans;
+    
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+    
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+        
+        if (text != null) {
+          int spanStart = offset;
+          int spanEnd = offset + text.length;
+          
+          bool hasDiagnostic = false;
+          Color? diagnosticColor;
+          
+          for (final diag in lineDiagnostics) {
+            final diagStartLine = diag.range['start']['line'] as int;
+            final diagEndLine = diag.range['end']['line'] as int;
+            final diagStartChar = diag.range['start']['character'] as int;
+            final diagEndChar = diag.range['end']['character'] as int;
+            
+            int diagStart, diagEnd;
+            
+            if (diagStartLine == lineIndex && diagEndLine == lineIndex) {
+              diagStart = lineStart + diagStartChar;
+              diagEnd = lineStart + diagEndChar;
+            } else if (diagStartLine == lineIndex) {
+              diagStart = lineStart + diagStartChar;
+              diagEnd = spanEnd;
+            } else if (diagEndLine == lineIndex) {
+              diagStart = lineStart;
+              diagEnd = lineStart + diagEndChar;
+            } else {
+              diagStart = lineStart;
+              diagEnd = spanEnd;
+            }
+            
+            if (!(spanEnd <= diagStart || spanStart >= diagEnd)) {
+              hasDiagnostic = true;
+              diagnosticColor = switch (diag.severity) {
+                1 => Colors.red,
+                2 => Colors.amber,
+                3 => Colors.blueAccent,
+                _ => null,
+              };
+              break;
+            }
+          }
+          
+          if (hasDiagnostic && diagnosticColor != null) {
+            List<TextSpan> charSpans = [];
+            
+            for (int i = 0; i < text.length; i++) {
+              final globalIdx = spanStart + i;
+              bool inDiagnostic = false;
+              Color? charDiagColor;
+              
+              for (final diag in lineDiagnostics) {
+                final diagStartLine = diag.range['start']['line'] as int;
+                final diagEndLine = diag.range['end']['line'] as int;
+                final diagStartChar = diag.range['start']['character'] as int;
+                final diagEndChar = diag.range['end']['character'] as int;
+                
+                int diagStart, diagEnd;
+                
+                if (diagStartLine == lineIndex && diagEndLine == lineIndex) {
+                  diagStart = lineStart + diagStartChar;
+                  diagEnd = lineStart + diagEndChar;
+                } else if (diagStartLine == lineIndex) {
+                  diagStart = lineStart + diagStartChar;
+                  diagEnd = lineStart + text.length;
+                } else if (diagEndLine == lineIndex) {
+                  diagStart = lineStart;
+                  diagEnd = lineStart + diagEndChar;
+                } else {
+                  diagStart = lineStart;
+                  diagEnd = lineStart + text.length;
+                }
+                
+                if (globalIdx >= diagStart && globalIdx < diagEnd) {
+                  inDiagnostic = true;
+                  charDiagColor = switch (diag.severity) {
+                    1 => Colors.red,
+                    2 => Colors.amber,
+                    3 => Colors.blueAccent,
+                    _ => null,
+                  };
+                  break;
+                }
+              }
+              
+              TextStyle? charStyle = span.style;
+              if (inDiagnostic && charDiagColor != null) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  decoration: TextDecoration.underline,
+                  decorationStyle: TextDecorationStyle.wavy,
+                  decorationThickness: 2,
+                  decorationColor: charDiagColor,
+                );
+              }
+              
+              charSpans.add(TextSpan(text: text[i], style: charStyle));
+            }
+            
+            result.add(TextSpan(children: charSpans));
+          } else {
+            result.add(span);
+          }
+          
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applyDiagnosticsStyling(children, lineIndex, offset);
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += _textLengthFromSpans(childSpans);
+        }
+      }
+    }
+    
+    return result;
+  }
+
+  List<InlineSpan> _applySelectionToSpans(
+    List<InlineSpan> spans,
+    int lineStart,
+    int selectionStart,
+    int selectionEnd,
+    Color selectedColor,
+  ) {
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+  
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+  
+        if (text != null) {
+          int spanStart = offset;
+          int spanEnd = offset + text.length;
+  
+          if (selectionEnd <= spanStart || selectionStart >= spanEnd) {
+            result.add(span);
+          } else {
+            int selStartInSpan = max(selectionStart - spanStart, 0);
+            int selEndInSpan = min(selectionEnd - spanStart, text.length);
+  
+            if (selStartInSpan > 0) {
+              result.add(TextSpan(
+                text: text.substring(0, selStartInSpan),
+                style: span.style,
+              ));
+            }
+            result.add(TextSpan(
+              text: text.substring(selStartInSpan, selEndInSpan),
+              style: span.style?.copyWith(
+                backgroundColor: selectedColor
+              ) ?? TextStyle(backgroundColor: _selectionStyle.selectionColor),
+            ));
+            if (selEndInSpan < text.length) {
+              result.add(TextSpan(
+                text: text.substring(selEndInSpan),
+                style: span.style,
+              ));
+            }
+          }
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applySelectionToSpans(
+            children,
+            offset,
+            selectionStart,
+            selectionEnd,
+            selectedColor,
+          );
+          final childrenLength = childSpans.fold<int>(0, (sum, s) {
+            if (s is TextSpan && s.text != null) {
+              return sum + s.text!.length;
+            }
+            return sum;
+          });
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += childrenLength;
+        }
+      }
+    }
+    return result;
+  }
+
+  Set<int> _findUnmatchedBrackets(String text) {
+    final stack = <int>[];
+    final unmatched = <int>{};
+    const pairs = {'(': ')', '{': '}', '[': ']', "'": "'", '"': '"'};
+    const openers = {'(', '{', '[', "'", '"'};
+    const closers = {')', '}', ']', "'", '"'};
+    String? currentStringQuote;
+
+    for (int i = 0; i < text.length; i++) {
+      final char = text[i];
+
+      if (char == '"' || char == "'") {
+        if (currentStringQuote == null) {
+          currentStringQuote = char;
+          stack.add(i);
+        } else if (currentStringQuote == char) {
+          if (stack.isNotEmpty && text[stack.last] == char) {
+            stack.removeLast();
+            currentStringQuote = null;
+          } else {
+            unmatched.add(i);
+          }
+        } else {
+          continue;
+        }
+        continue;
+      }
+
+      if (currentStringQuote != null) continue;
+
+      if (openers.contains(char)) {
+        stack.add(i);
+      } else if (closers.contains(char)) {
+        if (stack.isEmpty) {
+          unmatched.add(i);
+        } else {
+          final lastOpen = stack.last;
+          final openChar = text[lastOpen];
+          if (pairs[openChar] == char) {
+            stack.removeLast();
+          } else {
+            unmatched.add(i);
+          }
+        }
+      }
+    }
+
+    unmatched.addAll(stack);
+    
+    return unmatched;
+  }
+
+  int? _findMatchingBracket(String text, int pos) {
+    const Map<String, String> pairs = {
+      '(': ')',
+      '{': '}',
+      '[': ']',
+      ')': '(',
+      '}': '{',
+      ']': '[',
+    };
+    const String openers = '({[';
+
+    if (pos < 0 || pos >= text.length) return null;
+
+    final char = text[pos];
+    if (!pairs.containsKey(char)) return null;
+
+    final match = pairs[char]!;
+    final isForward = openers.contains(char);
+
+    int depth = 0;
+    if (isForward) {
+      for (int i = pos + 1; i < text.length; i++) {
+        if (text[i] == char) depth++;
+        if (text[i] == match) {
+          if (depth == 0) return i;
+          depth--;
+        }
+      }
+    } else {
+      for (int i = pos - 1; i >= 0; i--) {
+        if (text[i] == char) depth++;
+        if (text[i] == match) {
+          if (depth == 0) return i;
+          depth--;
+        }
+      }
+    }
+    return null;
+  }
+
+  int _findFirstVisibleLine(double viewTop) {
+    if(_lineTops.isEmpty) return 0;
+    int low = 0, high = _lineTops.length - 1, mid;
+    while (low < high) {
+      mid = (low + high) >> 1;
+      if (_lineTops[mid] < viewTop) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low.clamp(0, _lineTops.length - 1);
+  }
+
+  int _findLastVisibleLine(double viewBottom) {
+    if (_lineTops.isEmpty) return 0;
+    int low = 0, high = _lineTops.length - 1, mid;
+    while (low < high) {
+      mid = (low + high + 1) >> 1;
+      if (_lineTops[mid] <= viewBottom) {
+        low = mid;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return low.clamp(0, _lineTops.length - 1);
+  }
+
+  List<_Pair> _computeBracketPairs(String text) {
+    final pairs = <_Pair>[];
+    final stack = <int>[];
+    const openers = {'(', '{', '['};
+    const closers = {')', '}', ']'};
+    const matching = {'(': ')', '{': '}', '[': ']'};
+
+    for (int i = 0; i < text.length; i++) {
+      final ch = text[i];
+      if (openers.contains(ch)) {
+        stack.add(i);
+      } else if (closers.contains(ch)) {
+        if (stack.isNotEmpty) {
+          final open = stack.removeLast();
+          final openChar = text[open];
+          if (matching[openChar] == ch) {
+            pairs.add(_Pair(open, i));
+          }
+        }
+      }
+    }
+    return pairs;
+  }
+
+  Map<String,int> _indexToLineCol(int idx, List<int> lineStarts, List<String> lines) {
+    int low = 0, high = lineStarts.length - 1;
+    while (low <= high) {
+      int mid = (low + high) >> 1;
+      if (lineStarts[mid] <= idx) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    final int line = high.clamp(0, lineStarts.length - 1);
+    final int col = idx - lineStarts[line];
+    return {'line': line, 'col': col};
+  }
+
+  TextPainter _getLinePainter(int line, List<InlineSpan> baseSpans, double maxWidth, TextStyle defaultStyle) {
+    final cached = _lineTpCache[line];
+    if (cached != null) return cached;
+    final tpLine = TextPainter(
+      text: TextSpan(style: defaultStyle, children: baseSpans),
+      textDirection: TextDirection.ltr,
+    );
+    tpLine.layout(maxWidth: maxWidth);
+    _lineTpCache[line] = tpLine;
+    return tpLine;
+  }
+
+  Set<int> _findUnmatchedQuotesInLine(String lineText, int lineStartOffset) {
+    final unmatched = <int>{};
+    int? unclosedStringStart;
+
+    for (int i = 0; i < lineText.length; i++) {
+      final char = lineText[i];
+      final globalIdx = lineStartOffset + i;
+
+      if (char == '"' || char == "'") {
+        if (unclosedStringStart == null) {
+          unclosedStringStart = globalIdx;
+        } else {
+          final openingQuoteChar = lineText[unclosedStringStart - lineStartOffset];
+          if (openingQuoteChar == char) {
+            unclosedStringStart = null;
+          }
+        }
+        continue;
+      }
+    }
+
+    if (unclosedStringStart != null) {
+      for (int i = (unclosedStringStart - lineStartOffset); i < lineText.length; i++) {
+        unmatched.add(lineStartOffset + i);
+      }
+    }
+    
+    return unmatched;
+  }
+
+  List<FoldRange> _getFoldRanges(List<String> lines) {
+    List<FoldRange> foldRanges = [];
+    if (!_enableFolding) return foldRanges;
+    
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      if (line.trim().isEmpty || !line.trim().endsWith(':')) continue;
+      
+      final startIndent = line.length - line.trimLeft().length;
+      int j = i + 1;
+      
+      while (j < lines.length) {
+        final next = lines[j];
+        if (next.trim().isEmpty) {
+          j++;
+          continue;
+        }
+        final nextIndent = next.length - next.trimLeft().length;
+        if (nextIndent <= startIndent) break;
+        j++;
+      }
+      
+      if (j > i + 1 && j <= lines.length) {
+        foldRanges.add(FoldRange(i, j - 1));
+      }
+    }
+    
+    final Map<String, List<int>> stacks = {"{": [], "[": [], "(": []};
+    const Map<String, String> matchingBrackets = {"{": "}", "[": "]", "(": ")"};
+    
+    for (final openBracket in matchingBrackets.keys) {
+      final closeBracket = matchingBrackets[openBracket]!;
+      for (int i = 0; i < lines.length; i++) {
+        if (lines[i].contains(openBracket)) stacks[openBracket]!.add(i);
+        if (lines[i].contains(closeBracket)) {
+          if (stacks[openBracket]!.isNotEmpty) {
+            int start = stacks[openBracket]!.removeLast();
+            if (i > start) {
+              bool conflictsWithColonFold = foldRanges.any((fold) => 
+                (fold.startIndex == start && fold.endIndex == i) ||
+                (fold.startIndex == start) ||
+                (fold.endIndex == i && fold.startIndex < start)
+              );
+              
+              if (!conflictsWithColonFold) {
+                foldRanges.add(FoldRange(start, i));
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    foldRanges.sort((a, b) => a.startIndex.compareTo(b.startIndex));
+    
+    return foldRanges;
+  }
+
+  Map<String, int> _offsetToLineChar(int offset) {
+    final lines = _controller.text.split('\n');
+    int accum = 0;
+    for (int i = 0; i < lines.length; i++) {
+      final lineLen = lines[i].length;
+      if (offset >= accum && offset <= accum + lineLen) {
+        return {
+          'line': i,
+          'character': offset - accum,
+        };
+      }
+      accum += lineLen + 1;
+    }
+    final last = lines.length - 1;
+    return {
+      'line': last,
+      'character': lines.isNotEmpty ? lines.last.length : 0,
+    };
+  }
+
+  bool _isOffsetOverWord(int offset) {
+    final text = _controller.text;
+    if (offset < 0 || offset >= text.length) return false;
+    return RegExp(r'\w').hasMatch(text[offset]);
+  }
+
+  int _getGlobalPositionFromVisible(int visiblePosition) {
+    final lines = _controller.text.split('\n');
+    int visibleOffset = 0;
+    int globalOffset = 0;
+
+    for (int i = 0; i < lines.length; i++) {
+      final isFolded = _foldRanges.any((fold) => 
+        fold.isFolded && i > fold.startIndex && i <= fold.endIndex);
+
+      if (!isFolded) {
+        final lineLength = lines[i].length;
+        if (visiblePosition >= visibleOffset && visiblePosition <= visibleOffset + lineLength) {
+          return globalOffset + (visiblePosition - visibleOffset);
+        }
+        visibleOffset += lineLength + 1;
+        globalOffset += lineLength + 1;
+      } else {
+        globalOffset += lines[i].length + 1;
+      }
+    }
+    return globalOffset;
+  }
+
+  bool _isWordBoundary(String char) {
+    return char.trim().isEmpty || !RegExp(r'\w').hasMatch(char);
+  }
+
+  List<String> _buildDisplayLinesWithAI() {
+    if (_aiResponse != null && _aiResponse!.isNotEmpty && _controller.selection.isValid) {
+      final cursorPosition = _controller.selection.extentOffset;
+      final before = _controller.text.substring(0, cursorPosition);
+      final after = _controller.text.substring(cursorPosition);
+      return (before + _aiResponse! + after).split('\n');
+    } 
+    return _controller.text.split('\n');
+    
+  }
+
+  void _toggleFold(FoldRange fold) {
+    if (fold.isFolded) {
+      _unfoldWithChildren(fold);
+    } else {
+      _foldWithChildren(fold);
+    }
+    _controller.folds = _foldRanges;
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+
+  void _foldWithChildren(FoldRange parentFold) {
+    parentFold.clearOriginallyFoldedChildren();
+    
+    for (final childFold in _foldRanges) {
+      if (childFold.isFolded && 
+          childFold != parentFold &&
+          childFold.startIndex > parentFold.startIndex && 
+          childFold.endIndex <= parentFold.endIndex) {
+        parentFold.addOriginallyFoldedChild(childFold);
+        childFold.isFolded = false;
+      }
+    }
+    
+    parentFold.isFolded = true;
+  }
+
+  void _unfoldWithChildren(FoldRange parentFold) {
+    parentFold.isFolded = false;
+    for (final childFold in parentFold.originallyFoldedChildren) {
+      if (childFold.startIndex > parentFold.startIndex && 
+          childFold.endIndex <= parentFold.endIndex) {
+        childFold.isFolded = true;
+      }
+    }
+    parentFold.clearOriginallyFoldedChildren();
+  }
+
+  int _getLineAtOffset(int offset) {
+    final text = _controller.text;
+    final beforeCursor = text.substring(0, offset.clamp(0, text.length));
+    return beforeCursor.split('\n').length - 1;
+  }
+  
+ void _autoUnfoldOnEdit(int lineIndex) {
+  bool needsUpdate = false;
+  
+  for (final fold in _foldRanges) {
+    if (fold.isFolded && 
+        (fold.startIndex == lineIndex || 
+         (lineIndex > fold.startIndex && lineIndex <= fold.endIndex))) {
+      fold.isFolded = false;
+      
+      for (final child in fold.originallyFoldedChildren) {
+        child.isFolded = true;
+      }
+      fold.clearOriginallyFoldedChildren();
+      
+      needsUpdate = true;
+    }
+  }
+  
+  if (needsUpdate) {
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+}
+
+  void _autoUnfoldOnSelection(int startLine, int endLine) {
+    bool needsUpdate = false;
+    
+    for (final fold in _foldRanges) {
+      if (!fold.isFolded) continue;
+      
+      final selectionAffectsFold = 
+        (startLine <= fold.startIndex && endLine >= fold.startIndex) ||
+        (startLine <= fold.endIndex && endLine >= fold.endIndex) ||
+        (startLine > fold.startIndex && endLine <= fold.endIndex) ||
+        (startLine >= fold.startIndex && startLine <= fold.endIndex) ||
+        (endLine >= fold.startIndex && endLine <= fold.endIndex);
+      
+      if (selectionAffectsFold) {
+        fold.isFolded = false;
+        
+        for (final child in fold.originallyFoldedChildren) {
+          child.isFolded = true;
+        }
+        fold.clearOriginallyFoldedChildren();
+        
+        needsUpdate = true;
+      }
+    }
+    
+    if (needsUpdate) {
+      markNeedsLayout();
+      markNeedsPaint();
+    }
+  }
+
+  void _drawIndentationGuidelines(Canvas canvas, Offset offset, List<String> displayLines, int firstVisibleLine, int lastVisibleLine, double maxLinePainterWidth) {
+    if (!_enableGuideLines) return;
+    
+    final tempMeasure = TextPainter(
+      text: TextSpan(
+        text: " ",
+        style: _textStyle ?? _editorTheme['root']
+      ),
+      textDirection: TextDirection.ltr
+    );
+    tempMeasure.layout();
+
+    final double charWidth = tempMeasure.width;
+    final viewTop = _vscrollController.offset;
+    final viewBottom = viewTop + _vscrollController.position.viewportDimension;
+    final cursorPosition = _controller.selection.extentOffset;
+    final textBeforeCursor = _controller.text.substring(0, cursorPosition.clamp(0, _controller.text.length));
+    final currentLine = textBeforeCursor.split('\n').length - 1;
+    final tabSize = 4;
+    List<({int startLine, int endLine, int indentLevel})> blocks = [];
+    
+    for (int i = 0; i < displayLines.length; i++) {
+      if (_foldRanges.any((fold) => fold.isFolded && i > fold.startIndex && i <= fold.endIndex)) {
+        continue;
+      }
+      
+      final line = displayLines[i];
+      if (!line.trimRight().endsWith(':')) continue;
+      
+      final indent = line.length - line.trimLeft().length;
+      final indentLevel = indent ~/ tabSize;
+      
+      int endLine = i + 1;
+      while (endLine < displayLines.length) {
+        final nextLine = displayLines[endLine];
+        if (nextLine.trim().isEmpty) {
+          endLine++;
+          continue;
+        }
+        final nextIndent = nextLine.length - nextLine.trimLeft().length;
+        if (nextIndent <= indent) break;
+        endLine++;
+      }
+      
+      if (endLine <= i + 1) continue;
+      if (i + 1 >= _lineTops.length || endLine - 1 >= _lineTops.length || endLine - 1 >= _lineHeights.length) continue;
+      
+      blocks.add((startLine: i, endLine: endLine, indentLevel: indentLevel));
+    }
+    
+    int? selectedBlockIndex;
+    int minBlockSize = 999999;
+    
+    for (int idx = 0; idx < blocks.length; idx++) {
+      final block = blocks[idx];
+      if (currentLine >= block.startLine && currentLine < block.endLine) {
+        final blockSize = block.endLine - block.startLine;
+        if (blockSize < minBlockSize) {
+          minBlockSize = blockSize;
+          selectedBlockIndex = idx;
+        }
+      }
+    }
+    
+    for (int idx = 0; idx < blocks.length; idx++) {
+      final block = blocks[idx];
+      final isSelected = selectedBlockIndex == idx;
+      
+      final Paint guidePaint = Paint()
+        ..color = isSelected
+            ? (_editorTheme['root']?.color ?? Colors.grey)
+            : (_editorTheme['root']?.color ?? Colors.grey).withAlpha(100)
+        ..strokeWidth = isSelected ? 0.7 : 0.3
+        ..style = PaintingStyle.stroke;
+      
+      final double yTop = offset.dy
+        + (_innerPadding?.top ?? 0)
+        + _lineTops[block.startLine + 1]
+        - _vscrollController.offset;
+      
+      final double yBottom = offset.dy
+        + (_innerPadding?.top ?? 0)
+        + _lineTops[block.endLine - 1]
+        + _lineHeights[block.endLine - 1]
+        - _vscrollController.offset;
+      
+      if (yBottom < 0 || yTop > viewBottom) continue;
+      
+      final double guideX = offset.dx
+        + _gutterWidth
+        + (_innerPadding?.left ?? 0)
+        + ((block.indentLevel * charWidth) * tabSize)
+        - (_lineWrap ? 0 : _hscrollController.offset);
+      
+      final double clampedYTop = yTop.clamp(0.0, viewBottom);
+      final double clampedYBottom = yBottom.clamp(0.0, viewBottom);
+      
+      if (guideX >= _gutterWidth && guideX <= size.width) {
+        canvas.drawLine(
+          Offset(guideX, clampedYTop),
+          Offset(guideX, clampedYBottom),
+          guidePaint
+        );
+      }
+    }
+  }
+  
+  @override
+  bool hitTestSelf(Offset position) => true;
+
+  int? _dragStartOffset;
+  Timer? _selectionTimer, _hoverTimer;
+  bool _selectionActive = false, _isDragging = false;
+  Offset? _pointerDownPosition;
+
+  @override
+  void handleEvent(PointerEvent event, covariant BoxHitTestEntry entry) {
+    final localPosition = event.localPosition;
+    _currerntPosition = localPosition;
+    final padded = Offset(
+      localPosition.dx
+        - (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+        + _hscrollController.offset
+        - _gutterWidth,
+      localPosition.dy
+        - (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+        + _vscrollController.offset
+    );
+    TextPosition offset = _codeContent?.tp.getPositionForOffset(padded)
+    ?? TextPosition(offset: _controller.selection.extentOffset);
+
+    final globalOffset = _getGlobalPositionFromVisible(offset.offset);
+    if (globalOffset != -1) {
+      offset = TextPosition(offset: globalOffset);
+    }
+
+    if(event is PointerHoverEvent){
+      if(!(_hoverNotifier.value != null && _isHoveringPopup.value)){
+        _hoverNotifier.value = null;
+      }
+      
+      if(
+        (_hoverNotifier.value == null || !_isHoveringPopup.value) &&
+        _isOffsetOverWord(offset.offset)
+        ){
+        _hoverTimer?.cancel();
+        _hoverTimer = Timer(Duration(milliseconds: 1500), (){
+          final lineChar = _offsetToLineChar(offset.offset);
+          _hoverNotifier.value = [event.localPosition, lineChar];
+        });
+      } else {
+        _hoverNotifier.value = null;
+      }
+    }
+
+    void select(){
+      _selectionActive = _selectionNotifier.value = true;
+      final text = _controller.text;
+      final pos = offset.offset;
+      int start = pos, end = pos;
+      while (start > 0 && !_isWordBoundary(text[start - 1])) {
+        start--;
+      }
+      while (end < text.length && !_isWordBoundary(text[end])) {
+        end++;
+      }
+      _controller.selection = TextSelection(baseOffset: start, extentOffset: end);
+    }
+
+    if(
+      event is PointerDownEvent && event.buttons == kSecondaryButton ||
+      event is PointerUpEvent && isMobile && _selectionActive
+    ){
+      _offsetNotifier.value = event.localPosition;   
+    }
+
+    if (event is PointerDownEvent && event.buttons == kPrimaryButton) {
+      if(_offsetNotifier.value.dx > 0 || _offsetNotifier.value.dy > 0){
+        _offsetNotifier.value = Offset(-1, -1);
+      }
+
+      _dragStartOffset = offset.offset;
+      _dtap.addPointer(event);
+      _oneTap.addPointer(event);
+
+
+      if (isMobile) {
+        _dtap.onDoubleTap = (){
+          select();
+          _offsetNotifier.value = event.localPosition;
+        };
+
+        _oneTap.onTap = (){
+          if(_hoverNotifier.value != null) {
+            _hoverNotifier.value = null;
+          } else if(_isOffsetOverWord(offset.offset)) {
+            final lineChar = _offsetToLineChar(offset.offset);
+            _hoverNotifier.value = [localPosition, lineChar];
+          }
+        };
+
+        _draggingCHandle = false;
+        _draggingStartHandle = false;
+        _draggingEndHandle = false;
+        if (_controller.selection.baseOffset != _controller.selection.extentOffset) {
+          if (_startHandleRect?.contains(event.localPosition) ?? false) {
+            _draggingStartHandle = true;
+            _selectionActive = _selectionNotifier.value = true;
+            _pointerDownPosition = event.localPosition;
+            return;
+          }
+          if (_endHandleRect?.contains(event.localPosition) ?? false) {
+            _draggingEndHandle = true;
+            _selectionActive = _selectionNotifier.value = true;
+            _pointerDownPosition = event.localPosition;
+            return;
+          }
+        } else if(_normalHandle?.contains(event.localPosition) ?? false) {
+          _draggingCHandle = true;
+          _draggingStartHandle = _draggingEndHandle = false;
+          _selectionActive = _selectionNotifier.value = true;
+          _controller.selection = TextSelection.collapsed(offset: offset.offset);
+          _pointerDownPosition = event.localPosition;
+          return;
+        }
+
+        _dragStartOffset = offset.offset;
+        _isDragging = false;
+        _pointerDownPosition = event.localPosition;
+        _selectionActive = _selectionNotifier.value = false;
+        _selectionTimer?.cancel();
+        _selectionTimer = Timer(const Duration(milliseconds: 500), select);
+      } else{
+        _controller.selection = TextSelection.collapsed(offset: offset.offset);
+      }
+
+      for (final fold in _foldRanges) {
+        if (fold.startIndex >= _lineTops.length) continue;
+        final isInsideFoldedParent = _foldRanges.any(
+          (parent) => parent.isFolded && 
+                      parent.startIndex < fold.startIndex && 
+                      parent.endIndex >= fold.startIndex
+        );
+        
+        if (isInsideFoldedParent) continue;
+        
+        final iconRect = Rect.fromLTWH(
+          _gutterWidth - (_textStyle?.fontSize ?? 15) + (_innerPadding?.left ?? 0),
+          _lineTops[fold.startIndex] + (_innerPadding?.top ?? 0) - _vscrollController.offset,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+        );
+        
+        if (iconRect.contains(event.localPosition)) {
+          _toggleFold(fold);
+          return;
+        }
+      }
+    } 
+
+    if (event is PointerMoveEvent && _dragStartOffset != null) {
+      if(isMobile) {
+        final pos = _codeContent?.tp.getPositionForOffset(padded) ?? 
+            TextPosition(offset: _controller.selection.extentOffset);
+            
+        if (_draggingCHandle) {
+          _controller.selection = TextSelection.collapsed(offset: pos.offset);
+          markNeedsPaint();
+          return;
+        }
+
+        if (_draggingStartHandle || _draggingEndHandle) {
+          final base = _controller.selection.start;
+          final extent = _controller.selection.end;
+
+           if (_draggingStartHandle) {
+            final moving = pos.offset;
+
+            _controller.selection = TextSelection(
+              baseOffset: moving,
+              extentOffset: extent,
+            );
+
+            if (moving > extent) {
+              _draggingStartHandle = false;
+              _draggingEndHandle = true;
+            }
+          } else {
+            final moving = pos.offset;
+
+            _controller.selection = TextSelection(
+              baseOffset: base,
+              extentOffset: moving,
+            );
+
+            if (moving < base) {
+              _draggingEndHandle = false;
+              _draggingStartHandle = true;
+            }
+          }
+
+          markNeedsPaint();
+          return;
+        }
+
+        if (_dragStartOffset != null) {
+          if (isMobile) {
+            if ((event.localPosition - (_pointerDownPosition ?? event.localPosition)).distance > 10) {
+              _isDragging = true;
+            }
+            if (!_selectionActive) return;
+          }
+
+          _controller.selection = TextSelection(
+            baseOffset: _dragStartOffset!,
+            extentOffset: pos.offset,
+          );
+        }
+
+        if ((event.localPosition - _pointerDownPosition!).distance > 10) {
+          _isDragging = true;
+        }
+        if(!_selectionActive) return;
+      }
+      
+      final offset = _codeContent?.tp.getPositionForOffset(padded)
+        ?? TextPosition(offset: _controller.selection.extentOffset);
+  
+      _controller.selection = TextSelection(
+        baseOffset: _dragStartOffset!,
+        extentOffset: offset.offset,
+      );
+    }
+
+    if (event is PointerUpEvent || event is PointerCancelEvent) {
+      if(!_isDragging && isMobile && !_selectionActive){
+        _controller.selection = TextSelection.collapsed(offset: offset.offset);
+      }
+      _draggingStartHandle = false;
+      _draggingEndHandle = false;
+      _draggingCHandle = false;
+      _pointerDownPosition = null;
+      _dragStartOffset = null;
+      _selectionTimer?.cancel();
+      _selectionActive = _selectionNotifier.value = false;
+      if(_readOnly) return;
+      if(isMobile && !_isDragging){
+        _commonF(_controller);
+      } else if(!isMobile){
+        _controller.refresh();
+      }
+      _isDragging = false;
+    }
+
+    super.handleEvent(event, entry);
+  }
+
+  @override
+  void performLayout() {
+    final maxW = constraints.hasBoundedWidth ? constraints.maxWidth : 1000.0;
+    _lineTops.clear();
+    _lineHeights.clear();
+
+    List<String> displayLines = _buildDisplayLinesWithAI();
+
+    final defaultStyle = _textStyle ?? _editorTheme['root'];
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+
+    double y = 0;
+    double maxLineWidth = 0;
+    
+    for (int i = 0; i < displayLines.length; i++) {
+      bool isFolded = _foldRanges.any(
+        (fold) => 
+          fold.isFolded && i > fold.startIndex && i <= fold.endIndex
+        );
+      
+      if (isFolded) {
+        _lineTops.add(y);
+        _lineHeights.add(0);
+      } else {
+        tp.text = TextSpan(text: displayLines[i], style: defaultStyle);
+        final tpWidth = _lineWrap ? maxW - (_innerPadding?.horizontal ?? 0) - _gutterWidth : double.infinity;
+        tp.layout(maxWidth: tpWidth);
+        maxLineWidth = max(maxLineWidth, tp.width);
+        _lineTops.add(y);
+        _lineHeights.add(tp.height);
+        y += tp.height;
+      }
+    }
+
+    final contentWidth = maxLineWidth + (_innerPadding?.horizontal ?? 0);
+    final contentHeight = y + (_innerPadding?.vertical ?? 0);
+
+    size = constraints.constrain(Size(contentWidth, contentHeight));
+  }
+  
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    int? bracket1, bracket2;
+    final selection = _controller.selection;
+    final cursorPosition = selection.extentOffset;
+    String text = _lines.join('\n');
+    String controllerText = _controller.text;
+
+    if (cursorPosition >= 0 && cursorPosition <= text.length) {
+      final String? before = cursorPosition > 0
+          ? text[cursorPosition - 1]
+          : null;
+      final String? after = cursorPosition < text.length
+          ? text[cursorPosition]
+          : null;
+      final int? pos = (before != null && '{}[]()'.contains(before))
+          ? cursorPosition - 1
+          : (after != null && '{}[]()'.contains(after))
+          ? cursorPosition
+          : null;
+
+      if (pos != null) {
+        final match = _findMatchingBracket(text, pos);
+        if (match != null) {
+          bracket1 = pos;
+          bracket2 = match;
+        }
+      }
+    }
+
+    final canvas = context.canvas;
+    canvas.save();
+    canvas.drawPaint(
+      Paint()
+        ..color = _editorTheme['root']!.backgroundColor ?? Colors.transparent
+        ..style = PaintingStyle.fill
+    );
+    final defaultStyle = _textStyle ?? editorTheme['root'];
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+    final gutterPainter = TextPainter(textDirection: TextDirection.ltr);
+    final foldIconPainter = TextPainter(textDirection: TextDirection.ltr);
+
+    final unfoldIcon = _gutterStyle.unfoldedIcon; 
+    final foldIcon = _gutterStyle.foldedIcon;
+
+    final viewTop = _vscrollController.offset;
+    final viewBottom = viewTop + _vscrollController.position.viewportDimension;
+  
+    final selectedColor = _selectionStyle.selectionColor;
+  
+    final firstVisibleLine = _findFirstVisibleLine(viewTop);
+    final lastVisibleLine = _findLastVisibleLine(viewBottom);
+
+    List<String> displayLines;
+    if (_inFlightEdits.isNotEmpty) {
+      displayLines = controllerText.split('\n');
+      for (final entry in _inFlightEdits.entries) {
+        if (entry.key < displayLines.length) {
+          displayLines[entry.key] = entry.value;
+        }
+      }
+    } else {
+      displayLines = _buildDisplayLinesWithAI();
+    }
+
+    int aiStart = -1, aiEnd = -1;
+    if (_aiResponse != null && _aiResponse!.isNotEmpty && _controller.selection.isValid) {
+      aiStart = _controller.selection.extentOffset;
+      aiEnd = aiStart + _aiResponse!.length;
+      _controller.isShowingAiSuggestion = true;
+    }
+
+    final Set<int> unmatchedBrackets = _findUnmatchedBrackets(text).where((index) {
+      final char = text[index];
+      return '{}[]()'.contains(char);
+    }).toSet();
+
+    if (displayLines.isNotEmpty && _lineTops.isNotEmpty) {
+      int spanOffset = 0;
+      for (int i = 0; i < displayLines.length; i++) {
+        final displayText = displayLines[i];
+        final lineLength = displayText.length;
+        final lineStart = spanOffset;
+        final lineEnd = spanOffset + lineLength;
+        
+        if (i >= _lineTops.length ||
+            i < firstVisibleLine ||
+            i > lastVisibleLine ||
+            _foldRanges.any(
+              (item)=> item.startIndex < i && item.endIndex >= i && item.isFolded
+            )
+        ) {
+          spanOffset += lineLength + 1;
+          continue;
+        }
+        
+        final contentTop = _lineTops[i];
+
+        late List<InlineSpan> lineSpans;
+
+        if (aiStart >= 0 && aiEnd > aiStart && lineEnd > aiStart && lineStart < aiEnd) {
+          final aiLineStart = max(aiStart, lineStart) - lineStart;
+          final aiLineEnd = min(aiEnd, lineEnd) - lineStart;
+          final beforeAI = displayText.substring(0, aiLineStart);
+          final aiText = displayText.substring(aiLineStart, aiLineEnd);
+          final afterAI = displayText.substring(aiLineEnd);
+
+          final beforeSpans = _convert(
+            highlight.parse(beforeAI, language: _langId).nodes ?? [],
+            lineStart,
+          );
+          final aiSpans = TextSpan(
+            text: aiText,
+            style: defaultStyle?.copyWith(
+              color: Colors.grey[400],
+              fontStyle: FontStyle.italic
+            )
+          );
+          final afterSpans = _convert(
+            highlight.parse(afterAI, language: _langId).nodes ?? [],
+            lineStart + aiLineEnd,
+          );
+
+          lineSpans = [
+            ...beforeSpans,
+            aiSpans,
+            ...afterSpans,
+          ];
+        } else {
+          if (_cachedSpans[i] != null && _cachedSpans[i]!.isNotEmpty && !_inFlightEdits.containsKey(i)) {
+            lineSpans = _cachedSpans[i]!;
+          } else {
+            final nodes = highlight.parse(displayText, language: _langId).nodes ?? [];
+            lineSpans = _convert(nodes, lineStart);
+            if (!_inFlightEdits.containsKey(i)) _cachedSpans[i] = lineSpans;
+          }
+        }
+
+        final Set<int> unmatchedQuotes = _findUnmatchedQuotesInLine(displayText, lineStart);
+        final Set<int> allUnmatched = {...unmatchedBrackets, ...unmatchedQuotes};
+
+        lineSpans = _applyBracketHighlight(
+          lineSpans,
+          lineStart,
+          bracket1,
+          bracket2,
+          allUnmatched
+        );
+
+        lineSpans = _applyDiagnosticsStyling(lineSpans, i, lineStart);
+
+        if (!_inFlightEdits.containsKey(i) && selection.start < lineEnd && selection.end > lineStart) {
+          final selStart = selection.start.clamp(lineStart, lineEnd);
+          final selEnd = selection.end.clamp(lineStart, lineEnd);
+          lineSpans = _applySelectionToSpans(
+            lineSpans,
+            lineStart,
+            selStart,
+            selEnd,
+            selectedColor,
+          );
+        }
+
+        tp.text = TextSpan(
+          style: defaultStyle?.merge(
+            _foldRanges.any((fold) => fold.isFolded && fold.startIndex == i)
+              ? TextStyle(backgroundColor: _editorTheme['root']?.color?.withAlpha(50))
+              : null
+          ),
+          children: [
+            ...lineSpans,
+            if (_foldRanges.any((fold) => fold.isFolded && fold.startIndex == i))
+            TextSpan(text: ' ...', style: defaultStyle),
+          ]
+        );
+        final tpWidth = _lineWrap ? size.width - (_innerPadding?.horizontal ?? 0) : double.infinity;
+        tp.layout(maxWidth: tpWidth);
+        tp.paint(
+          canvas,
+          offset + Offset(
+            (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+              + _gutterWidth - (_lineWrap ? 0 : _hscrollController.offset)
+              ,
+            (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+              + contentTop
+              - _vscrollController.offset,
+          ),
+        );
+
+        spanOffset += lineLength + 1;
+      }
+      
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, _gutterWidth, viewBottom),
+        Paint()
+        ..style = PaintingStyle.fill
+        ..color = _gutterStyle.backgroundColor ??
+          _editorTheme['root']!.backgroundColor ??
+          Colors.transparent
+      );
+
+      if(_enableGutterDivider) {
+        canvas.drawRect(
+          Rect.fromLTWH(_gutterWidth, 0, 0.2, viewBottom),
+          Paint()
+            ..style = PaintingStyle.fill
+            ..color = _editorTheme['root']!.color!
+        );
+      }
+
+      for(int i=0; i<displayLines.length; i++){
+        if (
+          i >= _lineTops.length ||
+          i < firstVisibleLine ||
+          i > lastVisibleLine ||
+          _foldRanges.any(
+            (item)=> item.startIndex < i && item.endIndex >= i && item.isFolded
+          )
+        ) {
+          continue;
+        }
+
+        final contentTop = _lineTops[i];
+        gutterPainter.text = TextSpan(
+          text: (i + 1).toString(),
+          style: _gutterStyle.lineNumberStyle ?? defaultStyle
+        );
+
+        gutterPainter.textAlign = TextAlign.center;
+        gutterPainter.layout();
+        _gutterWidth = max(_gutterWidth, gutterPainter.width);
+
+        gutterPainter.paint(
+          canvas,
+          Offset(
+            offset.dx +  (_gutterWidth - gutterPainter.width) / 2,
+            offset.dy
+              + (_innerPadding?.vertical ?? 0)
+              + contentTop
+              - _vscrollController.offset
+          ),
+        );
+        
+        if(_foldRanges.isNotEmpty && _foldRanges.any((item)=> item.startIndex == i)){
+          final bool isInsideFoldedParent = _foldRanges.any(
+            (parent) => parent.isFolded && parent.startIndex < i && parent.endIndex >= i
+          );
+
+          if (!isInsideFoldedParent) {
+            final currentFolditem = _foldRanges.firstWhere((item) => item.startIndex == i);
+            final icon = currentFolditem.isFolded ? foldIcon : unfoldIcon;
+            foldIconPainter.text = TextSpan(
+              text: String.fromCharCode(icon.codePoint),
+              style: TextStyle(
+                color: (
+                  currentFolditem.isFolded ?
+                    _gutterStyle.foldedIconColor : _gutterStyle.unfoldedIconColor
+                ) ?? _editorTheme['root']?.color,
+                fontSize: (_textStyle?.fontSize ?? 15) + 2,
+                fontFamily: icon.fontFamily,
+                package: icon.fontPackage
+              )
+            );
+            
+            foldIconPainter.layout(maxWidth: _textStyle?.fontSize ?? 15);
+            foldIconPainter.paint(
+              canvas,
+              Offset(
+                _gutterWidth - foldIconPainter.width + (_innerPadding?.left ?? 0),
+                offset.dy + contentTop + (_innerPadding?.top ?? 0) - _vscrollController.offset + 1
+              )
+            );
+          }
+        }
+ 
+      }
+
+      canvas.save();
+      canvas.clipRect(Rect.fromLTWH(_gutterWidth, 0, size.width - _gutterWidth, size.height));
+
+      canvas.restore();
+
+      List<int> lineStarts = [];
+      int p = 0;
+      for (final l in displayLines) {
+        lineStarts.add(p);
+        p += l.length + 1;
+      }
+
+      List<_Pair> pairsToDraw = [];
+      for (final pr in _cachedBracketPairs) {
+        final openInfo = _indexToLineCol(pr.a, lineStarts, displayLines);
+        final closeInfo = _indexToLineCol(pr.b, lineStarts, displayLines);
+        final oLine = openInfo['line']!;
+        final cLine = closeInfo['line']!;
+        if (oLine != cLine && cLine >= firstVisibleLine && oLine <= lastVisibleLine) {
+          pairsToDraw.add(pr);
+        }
+      }
+
+      final double maxLinePainterWidth = _lineWrap ? size.width - (_innerPadding?.horizontal ?? 0) : double.infinity;
+
+      for (final pair in pairsToDraw) {
+        final open = _indexToLineCol(pair.a, lineStarts, displayLines);
+        final close = _indexToLineCol(pair.b, lineStarts, displayLines);
+        final int openLine = open['line']!;
+        final int closeLine = close['line']!;
+        if (openLine == closeLine) continue;
+
+        final bool isSelected = 
+          (bracket1 == pair.a && bracket2 == pair.b) ||
+          (bracket1 == pair.b && bracket2 == pair.a);
+
+        final Paint guidePaint = Paint()
+          ..color = isSelected
+              ? (_editorTheme['root']?.color ?? _textStyle?.color ?? Colors.grey)
+              : (_editorTheme['root']?.color ?? _textStyle?.color ?? Colors.grey).withAlpha(150)
+          ..strokeWidth = isSelected ? 0.7 : 0.3
+          ..style = PaintingStyle.stroke;
+
+        final String openLineText = displayLines[openLine];
+        final int openLeading = RegExp(r'^(\s*)').firstMatch(openLineText)?.group(0)?.length ?? 0;
+        List<InlineSpan> baseSpans;
+        if (_cachedSpans[openLine] != null && _cachedSpans[openLine]!.isNotEmpty) {
+          baseSpans = _cachedSpans[openLine]!;
+        } else {
+          final nodesForLine = highlight.parse(displayLines[openLine], language: _langId).nodes ?? [];
+          baseSpans = _convert(nodesForLine, lineStarts[openLine]);
+          _cachedSpans[openLine] = baseSpans;
+        }
+
+        final tpLine = _getLinePainter(openLine, baseSpans, maxLinePainterWidth, defaultStyle ?? TextStyle());
+
+        final dxLocal = tpLine.getOffsetForCaret(
+          TextPosition(offset: openLeading),
+          Rect.zero
+        ).dx;
+
+        final double guideX = offset.dx
+            + _gutterWidth
+            + (_innerPadding?.left ?? 0)
+            + dxLocal
+            - (_lineWrap ? 0 : _hscrollController.offset);
+
+        final double yTop = offset.dy
+          + (_innerPadding?.top ?? 0) 
+          + _lineTops[openLine + 1]
+          - _vscrollController.offset;
+        final double yBottom = offset.dy
+          + (_innerPadding?.top ?? 0)
+          + _lineTops[closeLine - 1]
+          + _lineHeights[closeLine]
+          - _vscrollController.offset;
+
+        if (guideX < _gutterWidth || guideX > size.width) continue;
+
+        final double fromY = yTop.clamp(0.0, viewBottom);
+        final double toY = yBottom.clamp(0.0, viewBottom);
+
+        if(_enableGuideLines) {
+          canvas.drawLine(
+            Offset(guideX, fromY), Offset(guideX, toY),
+            guidePaint
+          );
+        }
+      }
+
+      _drawIndentationGuidelines(
+        canvas,
+        offset,
+        displayLines,
+        firstVisibleLine,
+        lastVisibleLine,
+        maxLinePainterWidth
+      );
+    }
+  
+    if (_focusNode.hasFocus) {
+      final caretX = (_innerPadding?.left ?? 0)
+        + _gutterWidth
+        + _carretOffset.dx
+        - (_lineWrap ? 0 : _hscrollController.offset);
+      final caretY = (_innerPadding?.top ?? 0)
+        + _carretOffset.dy
+        - _vscrollController.offset;
+
+      if(_showCaret){
+        canvas.drawRect(
+          Rect.fromLTWH(
+            caretX,
+            caretY,
+            1.5,
+            _caretHeight
+          ),
+          _caretPainter,
+        );
+      }
+      
+      if(isMobile){
+        final Paint bubblePainter = Paint()
+        ..color = _selectionStyle.cursorBubbleColor
+        ..style = PaintingStyle.fill;
+
+        if(selection.end > selection.start){
+          final tpFull = TextPainter(
+            text: TextSpan(
+              text: _controller.text,
+              style: _textStyle,
+            ),
+            textDirection: TextDirection.ltr,
+          );
+          tpFull.layout();
+
+          final startCaret = tpFull.getOffsetForCaret(
+            TextPosition(offset: selection.start),
+            Rect.zero,
+          );
+          final endCaret = tpFull.getOffsetForCaret(
+            TextPosition(offset: selection.end),
+            Rect.zero,
+          );
+
+          final startCaretX = (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+            + startCaret.dx
+            + _gutterWidth
+            - (_lineWrap ? 0 : _hscrollController.offset);
+          final startCaretY = (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+            + startCaret.dy
+            - _vscrollController.offset;
+
+          final endCaretX = (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+            + endCaret.dx
+            + _gutterWidth
+            - (_lineWrap ? 0 : _hscrollController.offset);
+          final endCaretY = (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+            + endCaret.dy
+            - _vscrollController.offset;
+
+          canvas.drawRect(
+            Rect.fromLTWH(
+              startCaretX,
+              startCaretY,
+              1.5,
+              _caretHeight
+            ),
+            _caretPainter,
+          );
+          
+          _startHandleRect = Rect.fromLTWH(
+              startCaretX - _caretHeight,
+              startCaretY + _caretHeight,
+              _caretHeight,
+              _caretHeight,
+            );
+          
+          _endHandleRect = Rect.fromLTWH(
+              endCaretX,
+              endCaretY + _caretHeight,
+              _caretHeight,
+              _caretHeight,
+            );
+
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              _startHandleRect!,
+              topLeft: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25)
+            ),
+            bubblePainter,
+          );
+
+          canvas.drawRect(
+            Rect.fromLTWH(
+              endCaretX,
+              endCaretY,
+              1.5,
+              _caretHeight,
+            ),
+            _caretPainter,
+          );
+
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              _endHandleRect!,
+              topRight: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25)
+            ),
+            bubblePainter,
+          );
+
+          canvas.restore();
+        } else if(_showBubble) {
+          final handleSize = _caretHeight;
+          final handleCenterX = caretX;
+          final handleCenterY = caretY + _caretHeight;
+        
+          _normalHandle = Rect.fromLTWH(
+            handleCenterX,
+            handleCenterY,
+            handleSize,
+            handleSize,
+          );
+
+          canvas.save();
+          canvas.translate(handleCenterX, handleCenterY);
+          canvas.rotate(pi / 4);
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              Rect.fromCenter(center: Offset(_caretHeight / 2, _caretHeight / 2), width: handleSize, height: handleSize),
+              topRight: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25),
+            ),
+            bubblePainter,
+          );
+          canvas.restore();
+
+          if (_draggingCHandle) {
+            final caretLineIndex = _controller.selection.base.offset == -1
+                ? 0
+                : _controller.text.substring(0, _controller.selection.base.offset).split('\n').length - 1;
+            final lines = _controller.text.split('\n');
+            final lineText = (caretLineIndex >= 0 && caretLineIndex < lines.length)
+                ? lines[caretLineIndex]
+                : '';
+          
+            final caretInLine = _controller.selection.base.offset -
+                (caretLineIndex > 0 ? lines.take(caretLineIndex).map((l) => l.length + 1).reduce((a, b) => a + b) : 0);
+            final previewStart = caretInLine.clamp(0, lineText.length);
+            final previewEnd = (caretInLine + 10).clamp(0, lineText.length);
+            final previewText = lineText.substring(
+              max(0, previewStart - 10),
+              min(lineText.length, previewEnd),
+            );
+          
+            final zoomPainter = TextPainter(
+              text: TextSpan(
+                children: _convert(highlight.parse(
+                  previewText,
+                  language: _langId
+                ).nodes ?? []),
+                style: (_textStyle ?? _editorTheme['root'])?.copyWith(
+                  fontSize: (_textStyle?.fontSize ?? 14) * 1.5,
+                  backgroundColor: _editorTheme['root']?.backgroundColor ?? Colors.transparent
+                )
+              ),
+              textDirection: TextDirection.ltr,
+            );
+            zoomPainter.layout(maxWidth: size.width * 0.6);
+          
+            final zoomBoxWidth = zoomPainter.width + 16;
+            final zoomBoxHeight = zoomPainter.height + 12;
+            final zoomBoxX = caretX - zoomBoxWidth / 2;
+            final zoomBoxY = caretY - zoomBoxHeight - 18;
+          
+            final rrect = RRect.fromRectAndRadius(
+              Rect.fromLTWH(zoomBoxX, zoomBoxY, zoomBoxWidth, zoomBoxHeight),
+              Radius.circular(12),
+            );
+            
+            canvas.drawRRect(
+              rrect,
+              Paint()
+                ..color = _editorTheme['root']?.backgroundColor ?? Colors.transparent
+                ..style = PaintingStyle.fill
+            );
+
+            canvas.drawRRect(
+              rrect,
+              Paint()
+                ..color = _editorTheme['root']?.color ?? Colors.grey
+                ..style = PaintingStyle.stroke
+            );
+           
+            zoomPainter.paint(
+              canvas,
+              Offset(zoomBoxX + 8, zoomBoxY + 6),
+            );
+          }
+        }
+      }
+    }
+    canvas.restore();
+  }
+  
+  @override
+  void describeSemanticsConfiguration(SemanticsConfiguration config) {
+    super.describeSemanticsConfiguration(config);
+  }
+
+  void _ensureCaretVisible() {
+    final caretX = _carretOffset.dx + _gutterWidth + (_innerPadding?.horizontal ?? 0);
+    final caretY = _carretOffset.dy + (_innerPadding?.vertical ?? 0);
+    final vScrollOffset = _vscrollController.offset;
+    final hScrollOffset = _hscrollController.offset;
+    final viewportHeight = _vscrollController.position.viewportDimension;
+    final viewportWidth = _hscrollController.position.viewportDimension;
+
+    if (caretY > 0 && caretY <= vScrollOffset + (_innerPadding?.vertical ?? 0)) {
+      _vscrollController.animateTo(
+        caretY - (_innerPadding?.vertical ?? 0),
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    } else if (caretY + _caretHeight >= vScrollOffset + viewportHeight) {
+      _vscrollController.animateTo(
+        caretY + _caretHeight - viewportHeight + (_innerPadding?.vertical ?? 0),
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    }
+
+    if (caretX < hScrollOffset + (_innerPadding?.horizontal ?? 0) + _gutterWidth) {
+      _hscrollController.animateTo(
+        caretX - (_innerPadding?.horizontal ?? 0) - _gutterWidth,
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    } else if (caretX + 1.5 > hScrollOffset + viewportWidth) {
+      _hscrollController.animateTo(
+        caretX + 1.5 - viewportWidth + (_innerPadding?.horizontal ?? 0) + _gutterWidth,
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+  
+  @override
+  MouseCursor get cursor {
+    final localPosition = _currerntPosition;
+    if (localPosition.dx >= 0 && localPosition.dx < _gutterWidth) {
+      for(final fold in _foldRanges){
+        final iconRect = Rect.fromLTWH(
+          _gutterWidth - (_textStyle?.fontSize ?? 15) + (_innerPadding?.left ?? 0),
+          _lineTops[fold.startIndex] + (_innerPadding?.top ?? 0) - _vscrollController.offset,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+        );
+        if(iconRect.contains(_currerntPosition)){
+          return SystemMouseCursors.click;
+        }
+      }
+      return MouseCursor.defer;
+    }
+    return SystemMouseCursors.text;
+  }
+  
+  @override
+  PointerEnterEventListener? get onEnter => (event){};
+  
+  @override
+  PointerExitEventListener? get onExit => (event){};
+  
+  @override
+  bool get validForMouseTracker => true;
+}
+
+class _BackspaceNotifier extends ChangeNotifier {
+  int? _lineIndex;
+  String _lineText = '';
+  int? _caretInLine;
+  Offset? _caretOffset;
+
+  void setEdit({required int lineIndex, required String lineText, required int caretInLine, Offset? caretOffset}) {
+    _lineIndex = lineIndex;
+    _lineText = lineText;
+    _caretInLine = caretInLine;
+    _caretOffset = caretOffset;
+    
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(const Duration(milliseconds: 16), () {
+      notifyListeners();
+    });
+  }
+
+  void clear() {
+    _lineIndex = null;
+    _lineText = '';
+    _caretInLine = null;
+    _caretOffset = null;
+    _debounceTimer?.cancel();
+    notifyListeners();
+  }
+
+  Timer? _debounceTimer;
+
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    super.dispose();
+  }
+
+  int? get lineIndex => _lineIndex;
+  String get lineText => _lineText;
+  int? get caretInLine => _caretInLine;
+  Offset? get caretOffset => _caretOffset;
+}
+
+class _Pair { final int a, b; _Pair(this.a, this.b); }
+
+class FoldRange {
+  final int startIndex, endIndex;
+  bool isFolded = false;
+  List<FoldRange> originallyFoldedChildren = [];
+
+  FoldRange(this.startIndex, this.endIndex);
+  
+  void addOriginallyFoldedChild(FoldRange child) {
+    if (!originallyFoldedChildren.contains(child)) {
+      originallyFoldedChildren.add(child);
+    }
+  }
+  
+  void clearOriginallyFoldedChildren() {
+    originallyFoldedChildren.clear();
+  }
+  
+  bool containsLine(int line) {
+    return line > startIndex && line <= endIndex;
+  }
+}
+import 'dart:async';
+import 'dart:io';
+import 'dart:math';
+
+import 'code_content.dart';
+import 'scoll.dart';
+import 'controller.dart';
+import 'styling.dart';
+import '../LSP/lsp.dart';
+import '../AI_completion/ai.dart';
+
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:highlight/highlight.dart';
+import 'package:highlight/languages/python.dart';
+import 'package:flutter_highlight/themes/atom-one-dark.dart';
+import 'package:markdown_widget/config/configs.dart';
+import 'package:markdown_widget/widget/all.dart';
+
+part 'shortcuts.dart';
+
+//FIXME: Backspace issue in mobile
+//TODO: Dynamic height for hover bo
+//TODO: set undo stack start index to 1
+//TODO: Preserve text in a bugger
+
+class CodeForge extends StatefulWidget{
+  final CodeForgeController? controller;
+  final Map<String, TextStyle>? editorTheme;
+  final Mode? language;
+  final FocusNode? focusNode;
+  final TextStyle? textStyle;
+  final AiCompletion? aiCompletion;
+  final LspConfig? lspConfig;
+  final EdgeInsets? innerPadding;
+  final ScrollController? verticalScrollController;
+  final ScrollController? horizontalScrollController;
+  final UndoHistoryController? undoHistoryController;
+  final CodeSelectionStyle? selectionStyle;
+  final GutterStyle? gutterStyle;
+  final SuggestionStyle? suggestionStyle;
+  final HoverDetailsStyle? hoverDetailsStyle;
+  final String? filePath;
+  final String? initialText;
+  final bool readOnly;
+  final bool lineWrap;
+  final bool autoFocus;
+  final bool enableFolding;
+  final bool enableGuideLines;
+  final bool enableSuggestions;
+  final bool enableGutterDivider;
+
+  const CodeForge({
+    super.key,
+    this.controller,
+    this.editorTheme,
+    this.language,
+    this.aiCompletion,
+    this.lspConfig,
+    this.filePath,
+    this.initialText,
+    this.focusNode,
+    this.verticalScrollController,
+    this.horizontalScrollController,
+    this.undoHistoryController,
+    this.textStyle,
+    this.innerPadding,
+    this.readOnly = false,
+    this.autoFocus = false,
+    this.lineWrap = false,
+    this.enableFolding = true,
+    this.enableGuideLines = true,
+    this.enableSuggestions = true,
+    this.enableGutterDivider = false,
+    this.selectionStyle,
+    this.gutterStyle,
+    this.suggestionStyle,
+    this.hoverDetailsStyle
+  });
+
+  @override
+  State<CodeForge> createState() => _CodeForgeState();
+}
+
+class _CodeForgeState extends State<CodeForge> {
+  late final ScrollController _vscrollController, _hscrollController;
+  late final CodeForgeController _controller;
+  late final UndoHistoryController _undoController;
+  late final FocusNode _focusNode;
+  late final Map<String, TextStyle> _editorTheme;
+  late final ValueNotifier<CodeContent> _contentNotifier;
+  late final ValueNotifier<bool> _selectionNotifier;
+  late final ValueNotifier<Offset> _offsetNotifier;
+  late final CodeContent _content;
+  late final Mode _language;
+  late final CodeSelectionStyle _selectionStyle;
+  late final GutterStyle _gutterStyle;
+  late final SuggestionStyle _suggestionStyle;
+  late final HoverDetailsStyle _hoverDetailsStyle;
+  final _isMobile = Platform.isAndroid || Platform.isIOS;
+  final _suggScrollController = ScrollController();
+  final _backspaceNotifier = _BackspaceNotifier();
+  final Map<int, String> _heldLineEdits = {}, _originalLineStates = {};
+  final Map<String, String> _cachedResponse = {};
+  final ValueNotifier<String?> _aiNotifier = ValueNotifier(null);
+  final ValueNotifier<Offset?> _aiOffsetNotifier = ValueNotifier(null);
+  final ValueNotifier<List<dynamic>?> _suggestionNotifier = ValueNotifier(null);
+  final ValueNotifier<List<dynamic>?> _hoverNotifier = ValueNotifier(null);
+  final ValueNotifier<List<LspErrors>> _diagnosticsNotifier = ValueNotifier([]);
+  final ValueNotifier<bool> _isHoveringPopup = ValueNotifier(false);
+  List<dynamic> _suggestions = [];
+  TextInputConnection? _connection;
+  int? _holdLocalLine, _holdLocalCaretInLine;
+  int _sugSelIndex = 0;
+  String? _holdLocalLineText;
+  Timer? _keypressTimer, _aiDebounceTimer;
+  bool _isHovered = false, _backspaceHeld = false, _isTyping = false;
+  bool _deleteHeld = false;
+  bool _lspReady = false;
+  TextEditingValue? _previousValue;
+
+  @override
+  void initState() {
+    _controller = widget.controller ?? CodeForgeController();
+    _vscrollController = widget.verticalScrollController ?? ScrollController();
+    _hscrollController = widget.horizontalScrollController ?? ScrollController();
+    _undoController = widget.undoHistoryController ?? UndoHistoryController();
+    _editorTheme = widget.editorTheme ?? atomOneDarkTheme;
+    _selectionStyle = widget.selectionStyle ?? CodeSelectionStyle();
+    _gutterStyle = widget.gutterStyle ?? GutterStyle(
+      lineNumberStyle: widget.textStyle ?? _editorTheme['root'],
+      foldedIconColor: _editorTheme['root']?.color,
+      unfoldedIconColor: _editorTheme['root']?.color,
+      backgroundColor: _editorTheme['root']?.backgroundColor
+    );
+    _suggestionStyle = widget.suggestionStyle ?? SuggestionStyle(
+      elevation: 6,
+      textStyle: ((){
+        TextStyle style = widget.textStyle ?? _editorTheme['root']!;
+        if(style.color == null){
+          style = style.copyWith(
+            color: _editorTheme['root']!.color
+          ); 
+        } 
+        return style;
+      })(),
+      backgroundColor: _editorTheme['root']!.backgroundColor!,
+      focusColor: Colors.blueAccent.withAlpha(50),
+      hoverColor: Colors.grey.withAlpha(15),
+      splashColor: Colors.blueAccent.withAlpha(50),
+      shape: BeveledRectangleBorder(
+        side: BorderSide(
+          color: _editorTheme['root']!.color ?? Colors.grey[400]!,
+          width: 0.2,
+        ),
+      ),
+    );
+
+    _hoverDetailsStyle = widget.hoverDetailsStyle ?? HoverDetailsStyle(
+      shape: BeveledRectangleBorder(
+        side: BorderSide(
+          color: _editorTheme['root']!.color ?? Colors.grey[400]!,
+          width: 0.2,
+        ),
+      ),
+      backgroundColor: _editorTheme['root']!.backgroundColor!,
+      focusColor: Colors.blueAccent.withAlpha(50),
+      hoverColor: Colors.grey.withAlpha(15),
+      splashColor: Colors.blueAccent.withAlpha(50),
+      textStyle: ((){
+        TextStyle style = widget.textStyle ?? _editorTheme['root']!;
+        if(style.color == null){
+          style = style.copyWith(
+            color: _editorTheme['root']!.color
+          ); 
+        } 
+        return style;
+      })(),
+    );
+
+    _language = widget.language ?? python;
+    _focusNode = widget.focusNode ?? FocusNode();
+    _connection = _controller.connection;
+    _content = CodeContent(controller: _controller);
+    _contentNotifier = ValueNotifier(_content);
+    _selectionNotifier = ValueNotifier(false);
+    _offsetNotifier = ValueNotifier(Offset(-1, -1));
+    _controller.manualAiCompletion = getManualAiSuggestion;
+    _controller.readOnly = widget.readOnly;
+
+    if(widget.autoFocus) _focusNode.requestFocus();
+
+    if(widget.lspConfig != null){
+       if(widget.initialText != null){
+        throw ArgumentError(
+          'Cannot provide both filePath and initialText to CodeForge.'
+        );
+      }
+      _controller.text = File(widget.filePath!).readAsStringSync();
+
+      if ((widget.lspConfig!.filePath != widget.filePath) || widget.filePath == null) {
+        throw Exception(
+          'File path in LspConfig does not match the provided filePath in CodeCrafter.',
+        );
+      }
+      
+      (() async {
+        try {
+          if (widget.lspConfig is LspSocketConfig) {
+            await (widget.lspConfig as LspSocketConfig).connect();
+          }
+          await widget.lspConfig!.initialize();
+          await Future.delayed(const Duration(milliseconds: 300));
+          await widget.lspConfig!.openDocument();
+          setState(() {
+            _lspReady = true;
+          });
+        } catch (e) {
+          debugPrint('Error initializing LSP: e');
+        }
+      })();
+
+      widget.lspConfig!.responses.listen((data){
+        if (data['method'] == 'textDocument/publishDiagnostics') {
+          final diagnostics = data['params']['diagnostics'] as List;
+          _diagnosticsNotifier.value.clear();
+          if (diagnostics.isNotEmpty) {
+            final List<LspErrors> errors = [];
+            for (final (item as Map<String, dynamic>) in diagnostics) {
+              errors.add(
+                LspErrors(
+                  severity: (() {
+                    if (item['severity'] == 1 &&
+                        widget.lspConfig!.disableError) {
+                      return 0;
+                    }
+                    if (item['severity'] == 2 &&
+                        widget.lspConfig!.disableWarning) {
+                      return 0;
+                    }
+                    return item['severity'];
+                  })(),
+                  range: item['range'],
+                  message: item['message'],
+                ),
+              );
+            }
+            _diagnosticsNotifier.value = List.from(errors);
+          }
+        }
+      });
+    } else if(widget.initialText != null){
+      _controller.text = widget.initialText!;
+    }
+
+    _focusNode.addListener((){
+      if((_connection == null || !_connection!.attached) && !widget.readOnly){
+        _connection = TextInput.attach(
+          _controller,
+          TextInputConfiguration(
+            readOnly: widget.readOnly,
+            enableDeltaModel: !widget.readOnly,
+            inputType: TextInputType.multiline,
+            inputAction: TextInputAction.newline,
+            autocorrect: false
+        ));
+        _connection!.setEditingState(_controller.value);
+        _connection!.show();
+      }
+      _controller.refresh();
+    });
+
+    _controller.addListener((){
+      final text = _controller.text;
+      final lines = text.split('\n');
+      final line = lines.length - 1;
+      final cursorPosition = _controller.selection.extentOffset;
+      final prefix = _getCurrentWordPrefix(text, cursorPosition);
+      final character = lines.isNotEmpty ? lines.last.length : 0;
+      final currentValue = _controller.value;
+      final prevValue = _previousValue ?? currentValue;
+      _isTyping = false;
+
+      if(
+        currentValue.selection.extentOffset != prevValue.selection.extentOffset &&
+        currentValue.text == prevValue.text
+      ){
+        _suggestionNotifier.value = null;
+      } else if(_isMobile) {
+        _hoverNotifier.value = null;
+      }
+
+      
+
+      if(
+        widget.lspConfig != null && _lspReady &&
+        currentValue.text != prevValue.text
+      ){
+        (() async => await widget.lspConfig!.updateDocument(text))();
+      }
+
+      _contentNotifier.value = CodeContent(
+        controller: _controller,
+        textStyle: widget.textStyle
+      );
+      _aiDebounceTimer?.cancel();
+      
+      if(
+        widget.aiCompletion != null &&
+        _controller.selection.isValid &&
+        widget.aiCompletion!.enableCompletion
+      ){
+        
+        final text = _controller.text;
+        final cursorPosition = _controller.selection.extentOffset.clamp(0, text.length);
+        final textAfterCursor = text.substring(cursorPosition);        
+        if(cursorPosition <= 0) return;
+        bool lineEnd = textAfterCursor.isEmpty ||
+              textAfterCursor.startsWith('\n') ||
+              textAfterCursor.trim().isEmpty;
+        if(!lineEnd) return;
+        final codeToSend = "{text.substring(0, cursorPosition)}<|CURSOR|>{text.substring(cursorPosition)}";
+        if(
+          widget.aiCompletion!.completionType == CompletionType.auto ||
+          widget.aiCompletion!.completionType == CompletionType.mixed
+        ){
+          _aiDebounceTimer = Timer(
+            Duration(milliseconds: widget.aiCompletion!.debounceTime),
+            () async{
+              _aiNotifier.value = await _getCachedResponse(codeToSend);
+            }
+          );
+        }
+      }
+
+      if (currentValue.text.length == prevValue.text.length + 1 &&
+          currentValue.selection.baseOffset == prevValue.selection.baseOffset + 1
+        ) {
+        final insertedChar = currentValue.text.substring(
+          prevValue.selection.baseOffset,
+          currentValue.selection.baseOffset,
+        );
+        _isTyping =
+            insertedChar.isNotEmpty &&
+            RegExp(r'[a-zA-Z]').hasMatch(insertedChar);
+        if(
+          widget.enableSuggestions &&
+          _isTyping &&
+          prefix.isNotEmpty &&
+          _controller.selection.extentOffset > 0
+        ){
+          if(widget.lspConfig == null){
+            final regExp = RegExp(r'\b\w+\b');
+            final List<String> words = regExp
+              .allMatches(text)
+              .map((m) => m.group(0)!)
+              .toList();
+            String currentWord = '';
+            if(text.isNotEmpty){
+              final match = RegExp(r'\w+').firstMatch(text);
+              if (match != null) {
+                currentWord = match.group(0)!;
+              }
+            }
+            _suggestions.clear();
+            for(final i in words){
+              if(!_suggestions.contains(i) && i != currentWord) {
+                _suggestions.add(i);
+              }
+            }
+            if(prefix.isNotEmpty){
+              _suggestions = _suggestions
+                .where((s) => s.startsWith(prefix))
+                .toList();
+            }
+          } else if(_lspReady){
+              final lspConfig = widget.lspConfig!;
+              (() async{
+                final suggestion = await lspConfig.getCompletions(
+                  line,
+                  character
+                ); 
+                _suggestions = suggestion;
+              })();
+          }
+          _sortSuggestions(prefix);
+          final triggerChar = text[cursorPosition - 1];
+          if (!RegExp(r'[a-zA-Z]').hasMatch(triggerChar)) {
+              _suggestionNotifier.value = null;
+              return;
+          }
+          if (mounted && _suggestions.isNotEmpty) {
+            _sugSelIndex = 0;
+            _suggestionNotifier.value = _suggestions;
+          }
+        } else {
+          _suggestionNotifier.value = null; 
+        }
+      }
+      _previousValue = currentValue;
+
+    });
+    
+    WidgetsBinding.instance.addPostFrameCallback((_){
+      if(_vscrollController.hasClients) _vscrollController.jumpTo(0);
+      if(_hscrollController.hasClients) _hscrollController.jumpTo(0);
+      _controller.refresh();
+    });
+    super.initState();
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    _connection?.close();
+    _controller.dispose();
+    _contentNotifier.dispose();
+    _hscrollController.dispose();
+    _vscrollController.dispose();
+    super.dispose();
+  }
+
+  Map<String,int> _lineInfoAtGlobalOffset(int globalOffset) {
+    final lines = _controller.text.split('\n');
+    int accum = 0;
+    for (int i = 0; i < lines.length; i++) {
+      final lineLen = lines[i].length;
+      if (globalOffset >= accum && globalOffset <= accum + lineLen) {
+        return {'line': i, 'lineStart': accum, 'inLine': globalOffset - accum};
+      }
+      accum += lineLen + 1;
+    }
+    final last = max(0, lines.length - 1);
+    final lastStart = accum - (lines.isNotEmpty ? (lines.last.length + 1) : 0);
+    return {'line': last, 'lineStart': lastStart, 'inLine': lines.isNotEmpty ? lines.last.length : 0};
+  }
+  
+  void _commitHeldDeleteToController() {
+    if (!_deleteHeld) return;
+    if (_holdLocalLineText != null && _holdLocalLine != null) {
+      final currentText = _controller.text;
+      final lines = currentText.split('\n');
+      
+      if (_holdLocalLine! < lines.length) {
+        lines[_holdLocalLine!] = _holdLocalLineText!;
+        final newText = lines.join('\n');
+        final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + (_holdLocalCaretInLine ?? 0);
+        
+        _controller.value = _controller.value.copyWith(
+          text: newText,
+          selection: TextSelection.collapsed(offset: newCaret),
+        );
+      }
+    }
+    
+    _backspaceNotifier.clear();
+    _resetDeleteState();
+    _commonF(_controller);
+  }
+  
+  void _resetDeleteState() {
+    _holdLocalLine = null;
+    _holdLocalCaretInLine = null;
+    _holdLocalLineText = null;
+    _deleteHeld = false;
+    _heldLineEdits.clear();
+    _originalLineStates.clear();
+  }
+  
+  void _syncAndMoveToNextLine() {
+    final currentText = _controller.text;
+    final lines = currentText.split('\n');
+    
+    if (_holdLocalLine != null &&
+        _holdLocalLine! < lines.length - 1) {
+      final nextLineIndex = _holdLocalLine! + 1;
+      final currentLineText = _holdLocalLineText ?? lines[_holdLocalLine!];
+      final nextLineText = lines[nextLineIndex];
+  
+      final merged = currentLineText + nextLineText;
+      lines[_holdLocalLine!] = merged;
+      lines.removeAt(nextLineIndex);
+  
+      final newText = lines.join('\n');
+      final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + currentLineText.length;
+  
+      _controller.value = _controller.value.copyWith(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newCaret),
+      );
+  
+      _holdLocalLineText = merged;
+      _holdLocalCaretInLine = currentLineText.length;
+  
+      _backspaceNotifier.clear();
+      _controller.refresh();
+    }
+  }
+  
+  void _commitHeldBackspaceToController() {
+    if (!_backspaceHeld) return;
+    if (_holdLocalLineText != null && _holdLocalLine != null) {
+      final currentText = _controller.text;
+      final lines = currentText.split('\n');
+      
+      if (_holdLocalLine! < lines.length) {
+        lines[_holdLocalLine!] = _holdLocalLineText!;
+        final newText = lines.join('\n');
+        final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + (_holdLocalCaretInLine ?? 0);
+        
+        _controller.value = _controller.value.copyWith(
+          text: newText,
+          selection: TextSelection.collapsed(offset: newCaret),
+        );
+      }
+    }
+    
+    _backspaceNotifier.clear();
+    _resetBackspaceState();
+    _commonF(_controller);
+  }
+
+  void _resetBackspaceState() {
+    _holdLocalLine = null;
+    _holdLocalCaretInLine = null;
+    _holdLocalLineText = null;
+    _backspaceHeld = false;
+    _deleteHeld = false;
+    _heldLineEdits.clear();
+    _originalLineStates.clear();
+  }
+
+  void _syncAndMoveToPreviousLine() {
+    final currentText = _controller.text;
+    final lines = currentText.split('\n');
+    if (_holdLocalLine != null &&
+        _holdLocalLine! > 0 &&
+        _holdLocalLine! < lines.length) {
+      final prevLineIndex = _holdLocalLine! - 1;
+      final currentLineText = _holdLocalLineText ?? lines[_holdLocalLine!];
+
+      final merged = lines[prevLineIndex] + currentLineText;
+      lines[prevLineIndex] = merged;
+      lines.removeAt(_holdLocalLine!);
+
+      final newText = lines.join('\n');
+      final newCaret = _lineStartGlobalOffset(prevLineIndex) + merged.length;
+
+      _controller.value = _controller.value.copyWith(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newCaret),
+      );
+
+      _holdLocalLine = prevLineIndex;
+      _holdLocalLineText = merged;
+      _holdLocalCaretInLine = merged.length;
+
+      _backspaceNotifier.clear();
+      _controller.refresh();
+    }
+  }
+
+  int _lineStartGlobalOffset(int lineIndex) {
+    final lines = _controller.text.split('\n');
+    int acc = 0;
+    for (int i = 0; i < lineIndex && i < lines.length; i++) {
+      acc += lines[i].length + 1;
+    }
+    return acc;
+  }
+
+  Future<String> _getCachedResponse(String codeToSend) async {
+    final String key = codeToSend.hashCode.toString();
+    if (_cachedResponse.containsKey(key)) {
+      return _cachedResponse[key]!;
+    }
+    final String aiResponse = await widget.aiCompletion!.model.completionResponse(codeToSend);
+    _cachedResponse[key] = aiResponse;
+    return aiResponse;
+  }
+
+  void _sortSuggestions(String prefix) {
+    _suggestions.sort((a, b) {
+      final aStartsWith = a is LspCompletion
+          ? a.label.toLowerCase().startsWith(prefix.toLowerCase())
+          : a.toLowerCase().startsWith(prefix.toLowerCase());
+      final bStartsWith = b is LspCompletion
+          ? b.label.toLowerCase().startsWith(prefix.toLowerCase())
+          : b.toLowerCase().startsWith(prefix.toLowerCase());
+      if (aStartsWith && !bStartsWith) return -1;
+      if (!aStartsWith && bStartsWith) return 1;
+
+      return a is LspCompletion ? b.label.compareTo(a.label) : b.compareTo(a);
+    });
+  }
+
+  Future<void> getManualAiSuggestion() async {
+    if (widget.aiCompletion?.completionType == CompletionType.manual ||
+        widget.aiCompletion?.completionType == CompletionType.mixed) {
+      final String text = _controller.text;
+      final int cursorPosition = _controller.selection.extentOffset;
+      final String codeToSend = "{text.substring(0, cursorPosition)}<|CURSOR|>{text.substring(cursorPosition)}";
+      _aiNotifier.value = await _getCachedResponse(codeToSend);
+    }
+  }
+
+  String _getCurrentWordPrefix(String text, int offset) {
+    final safeOffset = offset.clamp(0, text.length);
+    final beforeCursor = text.substring(0, safeOffset);
+    final match = RegExp(r'([a-zA-Z_][a-zA-Z0-9_]*)').firstMatch(beforeCursor);
+    return match?.group(0) ?? '';
+  }
+
+void _scrollSuggestionToIndex(int index) {
+  final itemHeight = (widget.textStyle?.fontSize ?? 14) + 6.5;
+  final scrollOffset = _suggScrollController.offset;
+  final viewHeight = 390.0;
+
+  final itemTop = index * itemHeight;
+  final itemBottom = itemTop + itemHeight;
+
+  if (itemTop < scrollOffset) {
+    _suggScrollController.animateTo(
+      itemTop,
+      duration: Duration(milliseconds: 120),
+      curve: Curves.easeInOut,
+    );
+  } else if (itemBottom > scrollOffset + viewHeight) {
+    _suggScrollController.animateTo(
+      itemBottom - viewHeight,
+      duration: Duration(milliseconds: 120),
+      curve: Curves.easeInOut,
+    );
+  }
+}
+
+  @override
+  Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final screenHeight = MediaQuery.of(context).size.height;
+    return LayoutBuilder(
+      builder: (_, constraints) {
+        return GestureDetector(
+          onTap: _focusNode.requestFocus,
+          child: CallbackShortcuts(
+            bindings: _getShortcuts(_controller, widget.readOnly),
+            child: Stack(
+              children: [
+                RawScrollbar(
+                  thumbColor: _editorTheme['root']!.color!.withAlpha(110),
+                  radius: Radius.circular(20),
+                  controller: _vscrollController,
+                  interactive: !_isMobile,
+                  thumbVisibility: _isHovered,
+                  child: RawScrollbar(
+                    thumbColor: _editorTheme['root']!.color!.withAlpha(110),
+                    radius: Radius.circular(20),
+                    controller: _hscrollController,
+                    thumbVisibility: _isHovered,
+                    interactive: !_isMobile,
+                    child: MouseRegion(
+                      onEnter: (event) => setState(() => _isHovered = true),
+                      onExit: (event) => setState(() => _isHovered = false),
+                      child: UndoHistory<TextEditingValue>(
+                        value: _controller,
+                        controller: _undoController,
+                        focusNode: _focusNode,
+                          onTriggered:(value) {
+                            _controller.value = value;
+                            _controller.refresh();
+                          },
+                        shouldChangeUndoStack: (oldValue, newValue) {
+                          if (!newValue.selection.isValid) {
+                            return false;
+                          }
+
+                          if (oldValue == null && 
+                              newValue.text.isEmpty && 
+                              newValue.selection.extentOffset <= 0) {
+                            return false;
+                          }
+                          
+                          if (oldValue != null && oldValue.text == newValue.text) {
+                            return false;
+                          }
+                
+                          return oldValue == null ||
+                            oldValue.text != newValue.text ||
+                            oldValue.composing != newValue.composing;
+                        },
+                        child: ValueListenableBuilder(
+                          valueListenable: _selectionNotifier,
+                          builder: (_, selectionValue, child) {
+                            return TwoDimensionalScrollable(
+                              verticalDetails: ScrollableDetails.vertical(
+                                controller: _vscrollController,
+                                physics: selectionValue ? NeverScrollableScrollPhysics() : ClampingScrollPhysics()
+                              ),
+                              horizontalDetails: ScrollableDetails.horizontal(
+                                controller: _hscrollController,
+                                physics: selectionValue ? NeverScrollableScrollPhysics() : ClampingScrollPhysics()
+                              ),
+                              viewportBuilder: (_, voffset, hoffset) {
+                                return CustomViewport(
+                                  verticalOffset: voffset,
+                                  horizontalOffset: hoffset,
+                                  mainAxis: Axis.vertical,
+                                  verticalAxisDirection: AxisDirection.down,
+                                  horizontalAxisDirection: AxisDirection.right,
+                                  delegate: TwoDimensionalChildBuilderDelegate(
+                                    maxXIndex: 0,
+                                    maxYIndex: 0,
+                                    builder: (_, vicinity){
+                                      return ValueListenableBuilder(
+                                        valueListenable: _contentNotifier,
+                                        builder: (_, value, child) {
+                                          final codeField = _CodeField(
+                                              context,
+                                              _editorTheme,
+                                              _language,
+                                              _controller,
+                                              _focusNode,
+                                              widget.textStyle,
+                                              widget.innerPadding,
+                                              _vscrollController,
+                                              _hscrollController,
+                                              widget.lineWrap,
+                                              widget.enableFolding,
+                                              widget.readOnly,
+                                              widget.enableGuideLines,
+                                              value,
+                                              _selectionStyle,
+                                              _gutterStyle,
+                                              _selectionNotifier,
+                                              _aiNotifier,
+                                              _aiOffsetNotifier,
+                                              _offsetNotifier,
+                                              _hoverNotifier,
+                                              _diagnosticsNotifier,
+                                              _isHoveringPopup,
+                                              _backspaceNotifier,
+                                              widget.enableGutterDivider
+                                            );
+                                          return SizedBox(
+                                            height: value.totalHeight + (widget.innerPadding?.vertical ?? 0),
+                                            width: widget.lineWrap 
+                                              ? constraints.maxWidth
+                                              : max(
+                                                  value.totalWidth + (widget.innerPadding?.horizontal ?? 0),
+                                                  constraints.maxWidth
+                                                ),
+                                            child:
+                                            KeyboardListener(
+                                              focusNode: _focusNode,
+                                              onKeyEvent: (event) {
+                                                final isShiftPressed = HardwareKeyboard.instance.isShiftPressed;
+                                                final isCtrlPressed = HardwareKeyboard.instance.isControlPressed;
+                                                if(isCtrlPressed) return;
+
+                                                if (event is KeyUpEvent) {
+                                                  if(event.logicalKey == LogicalKeyboardKey.backspace){
+                                                    _commitHeldBackspaceToController();
+                                                  } else if(event.logicalKey == LogicalKeyboardKey.delete){
+                                                    _commitHeldDeleteToController();
+                                                  }
+                                                  return;
+                                                }
+                                                
+                                                if(event is KeyDownEvent){
+                                                  if(event.logicalKey == LogicalKeyboardKey.escape){
+                                                    _suggestionNotifier.value = null;
+                                                    _aiOffsetNotifier.value = null;
+                                                    _offsetNotifier.value = Offset(-1, -1);
+                                                  }
+                                                  
+                                                  if(
+                                                    event.logicalKey == LogicalKeyboardKey.enter &&
+                                                    _controller.isShowingSuggestions &&
+                                                    !_isMobile
+                                                  ){
+                                                    final suggestion = _suggestionNotifier.value?[_sugSelIndex];
+                                                    if(suggestion != null){
+                                                      if(suggestion is String){
+                                                      _controller.insertAtCurrentCursor(suggestion, replaceTypedChar: true);
+                                                      } else if(suggestion is LspCompletion){
+                                                        _controller.insertAtCurrentCursor(suggestion.label, replaceTypedChar: true);
+                                                      }
+                                                    }
+                                                    _suggestionNotifier.value = null;  
+                                                  }
+                                                  
+                                                }
+
+                                                if(event is KeyDownEvent || event is KeyRepeatEvent){
+                                                  final currentSelection = _controller.selection;
+                                                  final currentText = _controller.text;
+                                                  switch (event.logicalKey) {
+                                                    case LogicalKeyboardKey.delete: 
+                                                      if(widget.readOnly) return;
+                                                      _suggestionNotifier.value = null;
+                                                      if(!currentSelection.isValid) return;
+                                                      if(
+                                                        (event is KeyDownEvent && 
+                                                        !currentSelection.isCollapsed) ||
+                                                        (currentText.substring(
+                                                          currentSelection.extentOffset,
+                                                          (currentSelection.extentOffset + 1).clamp(0, currentText.length))
+                                                        ) == '\n'
+                                                      ) {
+                                                        _controller.delete();
+                                                        return;
+                                                      }
+
+                                                      if (!_deleteHeld) {
+                                                        final info = _lineInfoAtGlobalOffset(currentSelection.extentOffset);
+                                                        _holdLocalLine = info['line'];
+                                                        _holdLocalCaretInLine = info['inLine'];
+                                                        final lines = currentText.split('\n');
+                                                        _holdLocalLineText = (0 <= _holdLocalLine! && _holdLocalLine! < lines.length) 
+                                                            ? lines[_holdLocalLine!] 
+                                                            : '';
+                                                        _deleteHeld = true;
+                                                        _heldLineEdits.clear();
+                                                      }
+
+                                                      if (_holdLocalLineText != null) {
+                                                        final caretIn = _holdLocalCaretInLine ?? 0;
+                                                        final lineText = _holdLocalLineText!;
+
+                                                        if (caretIn < lineText.length) {
+                                                          final before = lineText.substring(0, caretIn);
+                                                          final after = lineText.substring(caretIn + 1);
+                                                          _holdLocalLineText = before + after;
+                                                          
+                                                          Offset carretOffset = _content.caretOffset;
+                                                          final tempPainter = TextPainter(
+                                                            text: TextSpan(
+                                                              text: before,
+                                                              style: widget.textStyle ?? _editorTheme['root']
+                                                            ),
+                                                            textDirection: TextDirection.ltr
+                                                          );
+                                                          tempPainter.layout();
+                                                          carretOffset = Offset(tempPainter.width, carretOffset.dy);
+
+                                                          _backspaceNotifier.setEdit(
+                                                            lineIndex: _holdLocalLine!,
+                                                            lineText: _holdLocalLineText!,
+                                                            caretInLine: _holdLocalCaretInLine!,
+                                                            caretOffset: carretOffset
+                                                          );
+                                                        } else if (caretIn >= lineText.length) {
+                                                          final lines = _holdLocalLineText != null
+                                                            ? _holdLocalLineText!.split('\n')
+                                                            : [];
+                                                          if (_holdLocalLine != null && _holdLocalLine! < lines.length - 1) {
+                                                            _syncAndMoveToNextLine();
+                                                          }
+                                                        }
+                                                      }
+                                                      break;
+
+                                                    case LogicalKeyboardKey.backspace:
+                                                      if(widget.readOnly) return;
+                                                      _suggestionNotifier.value = null;
+                                                      if (!currentSelection.isValid) return;
+                                                      if(
+                                                        event is KeyDownEvent &&
+                                                        !currentSelection.isCollapsed
+                                                      ){
+                                                        _controller.backspace();
+                                                        _commonF(_controller);
+                                                        return;
+                                                      }
+                                                      if (!_backspaceHeld) {
+                                                        final info = _lineInfoAtGlobalOffset(currentSelection.extentOffset);
+                                                        _holdLocalLine = info['line'];
+                                                        _holdLocalCaretInLine = info['inLine'];
+                                                        final lines = currentText.split('\n');
+                                                        _holdLocalLineText = (0 <= _holdLocalLine! && _holdLocalLine! < lines.length) 
+                                                            ? lines[_holdLocalLine!] 
+                                                            : '';
+                                                        _backspaceHeld = true;
+                                                        _heldLineEdits.clear();
+                                                      }
+                        
+                                                      if (_holdLocalLineText != null) {
+                                                        final caretIn = _holdLocalCaretInLine ?? 0;
+                        
+                                                        if (caretIn > 0 && caretIn <= _holdLocalLineText!.length) {
+                                                          final before = _holdLocalLineText!.substring(0, caretIn - 1);
+                                                          final after = _holdLocalLineText!.substring(caretIn);
+                                                          _holdLocalLineText = before + after;
+                                                          _holdLocalCaretInLine = caretIn - 1;
+                                                          
+                                                          Offset carretOffset = _content.caretOffset;
+                                                          final tempPainter = TextPainter(
+                                                            text: TextSpan(
+                                                              text: before,
+                                                              style: widget.textStyle ?? _editorTheme['root']
+                                                            ),
+                                                            textDirection: TextDirection.ltr
+                                                          );
+                                                          tempPainter.layout();
+                                                          carretOffset = Offset(tempPainter.width, carretOffset.dy);
+                        
+                                                          _backspaceNotifier.setEdit(
+                                                            lineIndex: _holdLocalLine!,
+                                                            lineText: _holdLocalLineText!,
+                                                            caretInLine: _holdLocalCaretInLine!,
+                                                            caretOffset: carretOffset
+                                                          );
+                                                        } else if (caretIn == 0 && _holdLocalLine! > 0) {
+                                                          _syncAndMoveToPreviousLine();
+                                                        }
+                                                      }
+                                                      break;
+                                                    case LogicalKeyboardKey.arrowUp:
+                                                      if(isShiftPressed) break;
+                                                      if(_suggestionNotifier.value != null){
+                                                        setState(() {
+                                                          _sugSelIndex = (_sugSelIndex - 1) % (_suggestionNotifier.value?.length ?? 1);
+                                                          _scrollSuggestionToIndex(_sugSelIndex);
+                                                        });
+                                                        return;
+                                                      }
+                                                      final textBeforeCursor = currentText.substring(0, currentSelection.extentOffset);
+                                                      final lines = textBeforeCursor.split('\n');
+                                                      if (lines.length > 1) {
+                                                        final currentLineStart = currentSelection.extentOffset - lines.last.length;
+                                                        final previousLineText = lines[lines.length - 2];
+                                                        final newOffset = currentLineStart - previousLineText.length - 1;
+                                                        
+                                                        final targetPosition = min(currentSelection.extentOffset - currentLineStart, previousLineText.length);
+                                                        final newCursorPosition = newOffset + targetPosition;
+                                                        
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: newCursorPosition)
+                                                        );
+                                                      } else if (currentSelection.extentOffset > 0) {
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: 0)
+                                                        );
+                                                      }
+                                                      break;
+                                    
+                                                    case LogicalKeyboardKey.arrowDown:
+                                                      if(isShiftPressed) break;
+                                                      if(_suggestionNotifier.value != null){
+                                                        setState(() {
+                                                          _sugSelIndex = (_sugSelIndex + 1) % (_suggestionNotifier.value?.length ?? 1);
+                                                          _scrollSuggestionToIndex(_sugSelIndex);
+                                                        });
+                                                        return;
+                                                      }
+                                                      final lines = currentText.split('\n');
+                                                      int caret = currentSelection.extentOffset;
+                                                      int charCount = 0;
+                                                      int currentLine = 0;
+                                                      for (int i = 0; i < lines.length; i++) {
+                                                        if (caret <= charCount + lines[i].length) {
+                                                          currentLine = i;
+                                                          break;
+                                                        }
+                                                        charCount += lines[i].length + 1;
+                                                      }
+                                                      final currentLineStart = charCount;
+                                                      final horizontalPosition = caret - currentLineStart;
+                                                      if (currentLine < lines.length - 1) {
+                                                        final nextLineText = lines[currentLine + 1];
+                                                        final targetPosition = min(horizontalPosition, nextLineText.length);
+                                                        final newCursorPosition = currentLineStart + lines[currentLine].length + 1 + targetPosition;
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: min(newCursorPosition, currentText.length))
+                                                        );
+                                                      } else {
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: currentText.length)
+                                                        );
+                                                      }
+                                                      break;
+                                    
+                                                    case LogicalKeyboardKey.arrowLeft:
+                                                      if(isShiftPressed) break;
+                                                      _suggestionNotifier.value = null;
+                                                      if(currentSelection.extentOffset > 0 && currentText.isNotEmpty){
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(
+                                                            offset: currentSelection.extentOffset - 1
+                                                          )
+                                                        );
+                                                      }
+                                                      break;
+                                                      
+                                                    case LogicalKeyboardKey.arrowRight:
+                                                      if(isShiftPressed) break;
+                                                      _suggestionNotifier.value = null;
+                                                      if(_aiNotifier.value != null){
+                                                        _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                                                        _aiNotifier.value = null;
+                                                        _aiOffsetNotifier.value = null;
+                                                        break;
+                                                      }
+                                                      if(currentText.isNotEmpty && currentSelection.extentOffset < currentText.length){
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(
+                                                            offset: currentSelection.extentOffset + 1
+                                                          )
+                                                        );
+                                                      }
+                                                      break;
+
+                                                    case LogicalKeyboardKey.tab:
+                                                      if(_aiNotifier.value != null){
+                                                        _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                                                        _aiNotifier.value = null;
+                                                        _aiOffsetNotifier.value = null;
+                                                      }
+                                                      break;
+                                                  }
+                                                }
+                                                
+                                                if(event.logicalKey != LogicalKeyboardKey.backspace){
+                                                  if(event is KeyDownEvent){
+                                                    _commonF(_controller);
+                                                  } else if(event is KeyRepeatEvent){
+                                                    _keypressTimer?.cancel();
+                                                    Timer(Duration(milliseconds: 5), ()=> _controller.refresh());
+                                                    _keypressTimer = Timer(Duration(milliseconds: 50), () {
+                                                      if(_connection == null || !_connection!.attached){
+                                                        _connection = TextInput.attach(
+                                                          _controller,
+                                                          TextInputConfiguration(
+                                                            enableDeltaModel: true,
+                                                            inputType: TextInputType.multiline,
+                                                            inputAction: TextInputAction.newline
+                                                        ));
+                                                        _connection!.show();
+                                                        _connection!.setEditingState(_controller.value);
+                                                      }
+                                                      else{
+                                                        _connection!.setEditingState(_controller.value);
+                                                      }
+                                                    });
+                                                  }
+                                                }
+                                              },
+                                              child: codeField
+                                            )
+                                          );
+                                        }
+                                      );
+                                    }
+                                  ),
+                                );
+                              }
+                            );
+                          }
+                        ),
+                      )
+                    ),
+                  ),
+                ),
+                ValueListenableBuilder<Offset?>(
+                  valueListenable: _aiOffsetNotifier,
+                  builder: (context, offvalue, child) {
+                    return _isMobile && _aiNotifier.value != null && offvalue != null && _aiNotifier.value!.isNotEmpty ? Positioned(
+                      top: offvalue.dy + (widget.textStyle?.fontSize ?? 14) * _aiNotifier.value!.split('\n').length + 15,
+                      left: offvalue.dx + (_aiNotifier.value!.split('\n')[0].length * (widget.textStyle?.fontSize ?? 14) / 2),
+                      child: Row(
+                        children: [
+                          InkWell(
+                            onTap: (){
+                              if(_aiNotifier.value == null) return;
+                              _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                              _aiNotifier.value = null;
+                              _aiOffsetNotifier.value = null;
+                            },
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: _editorTheme['root']?.backgroundColor,
+                                borderRadius: BorderRadius.all(Radius.circular(8)),
+                                border: BoxBorder.all(
+                                  width: 1.5,
+                                  color: Color(0xff64b5f6)
+                                )
+                              ),
+                              child: Icon(
+                                Icons.check,
+                                color: _editorTheme['root']?.color,
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            width: 30,
+                          ),
+                          InkWell(
+                            onTap: () {
+                              _aiNotifier.value = null;
+                              _aiOffsetNotifier.value = null;
+                            },
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: _editorTheme['root']?.backgroundColor,
+                                borderRadius: BorderRadius.all(Radius.circular(8)),
+                                border: BoxBorder.all(
+                                  width: 1.5,
+                                  color: Colors.red
+                                )
+                              ),
+                              child: Icon(
+                                Icons.close,
+                                color: _editorTheme['root']?.color,
+                              ),
+                            )
+                          )
+                        ],
+                      ),
+                    ) : SizedBox.shrink();
+                  }
+                ),
+                ValueListenableBuilder<Offset>(
+                  valueListenable: _offsetNotifier,
+                  builder: (_, pos, child){
+                    final toolbarStyle = TextStyle(color: Colors.grey[400]);
+                    final shortCutStyle = TextStyle(color: Colors.grey[600]);
+                    void copy() async {
+                      final selection = _controller.selection;
+                      final text = _controller.text;
+                      if (selection.isValid && !selection.isCollapsed) {
+                        final selectedText = text.substring(
+                          selection.start,
+                          selection.end,
+                        );
+                        Clipboard.setData(ClipboardData(text: selectedText));
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void paste() async{
+                      if(widget.readOnly) return;
+                      final data = await Clipboard.getData('text/plain');
+                      final pasteText = data?.text ?? '';
+                      if (pasteText.isNotEmpty) {
+                        final selection = _controller.selection;
+                        final text = _controller.text;
+                        final before = text.substring(0, selection.start);
+                        final after = text.substring(selection.end);
+                        final newText = before + pasteText + after;
+                        final newOffset = before.length + pasteText.length;
+                        _controller.value = _controller.value.copyWith(
+                          text: newText,
+                          selection: TextSelection.collapsed(offset: newOffset),
+                        );
+                        _commonF(_controller);
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void cut(){
+                      if(widget.readOnly) return;
+                      final selection = _controller.selection;
+                      final text = _controller.text;
+                      if (selection.isValid && !selection.isCollapsed) {
+                        final selectedText = text.substring(selection.start, selection.end);
+                        Clipboard.setData(ClipboardData(text: selectedText));
+                        final before = text.substring(0, selection.start);
+                        final after = text.substring(selection.end);
+                        final newText = before + after;
+                        _controller.value = _controller.value.copyWith(
+                          text: newText,
+                          selection: TextSelection.collapsed(offset: before.length),
+                        );
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void selectAll(){
+                      _controller.value = _controller.value.copyWith(
+                        selection: TextSelection(
+                          baseOffset: 0,
+                          extentOffset: _controller.text.length
+                        ),
+                      );
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    return pos.dx < 0 || pos.dy < 0 ? SizedBox.shrink() : _isMobile ? TextSelectionToolbar(
+                      anchorAbove: pos,
+                      anchorBelow: pos,
+                      children: [
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(left: 10),
+                          onPressed: copy,
+                          child: Text("Copy"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(left: 10),
+                          onPressed: paste,
+                          child: Text("Paste"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.zero,
+                          onPressed: cut,
+                          child: Text("Cut"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(right: 10),
+                          onPressed: selectAll,
+                          child: Text("SelectAll"),
+                        ),
+                      ]
+                    ) : Positioned(
+                      top: pos.dy,
+                      left: pos.dx,
+                      width: 200,
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: [
+                          Card(
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadiusGeometry.circular(5),
+                              side: BorderSide(
+                                color: _editorTheme['root']!.color ?? Colors.grey,
+                                width: 0.2
+                              )
+                            ),
+                            color: Color(0xff202020),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                ListTile(
+                                  dense: true,
+                                  onTap: copy,
+                                  title: Text("Copy"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + C"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                  shape: BeveledRectangleBorder(
+                                    borderRadius: BorderRadiusGeometry.vertical(
+                                      top: Radius.circular(3)
+                                    )
+                                  ),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: paste,
+                                  title: Text("Paste"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + V"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: cut,
+                                  title: Text("Cut"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + X"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: selectAll,
+                                  title: Text("SelectAll"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + A"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                  shape: BeveledRectangleBorder(
+                                    borderRadius: BorderRadiusGeometry.vertical(
+                                      bottom: Radius.circular(3)
+                                    )
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+                ),
+                ValueListenableBuilder(
+                  valueListenable: _suggestionNotifier,
+                  builder: (_, sugg, child){
+                    if(sugg == null) {
+                      _sugSelIndex = 0;
+                      _controller.isShowingSuggestions = false;
+                      return SizedBox.shrink();
+                    }
+                    _controller.isShowingSuggestions = true;
+                    return Positioned(
+                      width: screenWidth < 700 ? screenWidth * 0.63 : screenWidth * 0.3,
+                      top: _contentNotifier.value.caretOffset.dy + (widget.textStyle?.fontSize ?? 14) + 10,
+                      left: _contentNotifier.value.caretOffset.dx + 50,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: 400,
+                          maxWidth: 400,
+                          minWidth: 70
+                        ),
+                        child: Card(
+                          shape: _suggestionStyle.shape,
+                          elevation: _suggestionStyle.elevation,
+                          color: _suggestionStyle.backgroundColor,
+                          margin: EdgeInsets.zero,
+                          child: RawScrollbar(
+                            thumbVisibility: true,
+                            thumbColor: _editorTheme['root']!.color!.withAlpha(80),
+                            controller: _suggScrollController,
+                            child: ListView.builder(
+                              itemExtent: (widget.textStyle?.fontSize ?? 14) + 6.5,
+                              controller: _suggScrollController,
+                              padding: EdgeInsets.all(6),
+                              shrinkWrap: true,
+                              itemCount: sugg.length,
+                              itemBuilder: (_, indx){
+                                final item = sugg[indx];
+                                return Container(
+                                  color: _sugSelIndex == indx ? Color(0xff024281) : Colors.transparent,
+                                  child: InkWell(
+                                    canRequestFocus: false,
+                                    hoverColor: _suggestionStyle.hoverColor,
+                                    focusColor: _suggestionStyle.focusColor,
+                                    splashColor: _suggestionStyle.splashColor,
+                                    onTap: () => setState(() {
+                                      _sugSelIndex = indx;
+                                      final text = item is LspCompletion ? item.label : item as String;
+                                      _controller.insertAtCurrentCursor(text, replaceTypedChar: true);
+                                      _suggestionNotifier.value = null;
+                                    }),
+                                    child: Row(
+                                      children: [
+                                        if(item is LspCompletion) ...[
+                                          item.icon,
+                                          const SizedBox(width: 10),
+                                          Text(
+                                            item.label,
+                                            style: _suggestionStyle.textStyle
+                                          )
+                                        ],
+                                        if(item is String) Text(
+                                          item,
+                                          style: _suggestionStyle.textStyle
+                                        )
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          )
+                        ),
+                      ),
+                    );
+                  }
+                ),
+                ValueListenableBuilder(
+                  valueListenable: _hoverNotifier,
+                  builder: (_, hov, c){
+                    if(hov == null || widget.lspConfig == null) return SizedBox.shrink();
+                    final Offset position = hov[0];
+                    final Map<String, int> lineChar = hov[1];
+                    final hoverScrollController = ScrollController();
+                    final width = _isMobile ? screenWidth * 0.63 : screenWidth * 0.3;
+                    final height = _isMobile ? screenHeight * 0.4 : 550.0;
+                    return Positioned(
+                      width: width,
+                      height: height,
+                      top: (screenHeight - position.dy) < 550 ? position.dy - height : position.dy,
+                      left: (screenWidth - position.dx) < width ? position.dx - width : position.dx,
+                      child: MouseRegion(
+                        onEnter: (_) => _isHoveringPopup.value = true,
+                        onExit: (_) => _isHoveringPopup.value = false,
+                        child: Card(
+                          color: _hoverDetailsStyle.backgroundColor,
+                          shape: _hoverDetailsStyle.shape,
+                          child: FutureBuilder<String>(
+                              future: (() async{
+                                final lspConfig = widget.lspConfig;
+                                final line = lineChar['line']!;
+                                final character = lineChar['character']!;
+                                final diagnostic = _diagnosticsNotifier.value.firstWhere(
+                                  (diag) {
+                                    final diagStartLine = diag.range['start']['line'] as int;
+                                    final diagEndLine = diag.range['end']['line'] as int;
+                                    final diagStartChar = diag.range['start']['character'] as int;
+                                    final diagEndChar = diag.range['end']['character'] as int;
+                                    
+                                    if (line < diagStartLine || line > diagEndLine) {
+                                      return false;
+                                    }
+                                    
+                                    if (line == diagStartLine && line == diagEndLine) {
+                                      return character >= diagStartChar && character < diagEndChar;
+                                    } else if (line == diagStartLine) {
+                                      return character >= diagStartChar;
+                                    } else if (line == diagEndLine) {
+                                      return character < diagEndChar;
+                                    } else {
+                                      return true;
+                                    }
+                                  },
+                                  orElse: () => LspErrors(severity: 0, range: {}, message: ''),
+                                );
+                        
+                                if(diagnostic.message.isNotEmpty){
+                                  return diagnostic.message;
+                                }
+                        
+                                if(lspConfig != null){
+                                  return await lspConfig.getHover(line, character);
+                                }
+                        
+                                final hoverDetails = await lspConfig!.getHover(line, character);
+                                return hoverDetails;
+                              })(),
+                              builder: (_, snapShot) {
+                                if (snapShot.hasError) {
+                                  return SizedBox.shrink();
+                                }
+                                final data = snapShot.data;
+                                if (data == null || data.isEmpty) {
+                                  return SizedBox.shrink();
+                                }
+                                if (snapShot.connectionState == ConnectionState.waiting) {
+                                  return Text(
+                                    "Loading...",
+                                    style: _hoverDetailsStyle.textStyle,
+                                  );
+                                }
+                                return Padding(
+                                  padding: const EdgeInsets.all(8.0),
+                                  child: RawScrollbar(
+                                    controller: hoverScrollController,
+                                    thumbVisibility: true,
+                                    thumbColor: _editorTheme['root']!.color!.withAlpha(100),
+                                    child: SingleChildScrollView(
+                                      controller: hoverScrollController,
+                                      child: MarkdownBlock(
+                                        data: data,
+                                        config: MarkdownConfig.darkConfig.copy(
+                                          configs: [
+                                            PConfig(
+                                              textStyle: _hoverDetailsStyle.textStyle
+                                            ),
+                                            PreConfig(
+                                              language: widget.lspConfig?.languageId ?? "dart",
+                                              theme: _editorTheme,
+                                              textStyle: TextStyle(
+                                                fontSize: _hoverDetailsStyle.textStyle.fontSize
+                                              ),
+                                              styleNotMatched: TextStyle(
+                                                color: _editorTheme['root']!.color
+                                              ),
+                                              decoration: BoxDecoration(
+                                                borderRadius: BorderRadius.zero,
+                                                border: Border.all(
+                                                  width: 0.2,
+                                                  color: _editorTheme['root']!.color ?? Colors.grey
+                                                )
+                                              )
+                                            )
+                                          ]
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+                            ),
+                        ),
+                      ),
+                    );
+                  }
+                )
+              ],
+            ),
+          ),
+        );
+      }
+    );
+  }
+}
+
+class _CodeField extends LeafRenderObjectWidget{
+  final BuildContext context;
+  final Map<String, TextStyle> editorTheme;
+  final Mode languade;
+  final CodeForgeController controller;
+  final FocusNode focusNode;
+  final CodeSelectionStyle selectionStyle;
+  final GutterStyle gutterStyle;
+  final TextStyle? textStyle;
+  final EdgeInsets? innerPadding;
+  final ScrollController hscrollController, vscrollController;
+  final bool lineWrap, enableFolding, enableGuideLines, readOnly;
+  final CodeContent? codeContent;
+  final ValueNotifier<bool> selectionNotifier;
+  final ValueNotifier<Offset> offsetNotifier;
+  final ValueNotifier<String?> aiNotifier;
+  final ValueNotifier<Offset?> aiOffsetNotifier;
+  final ValueNotifier<List<dynamic>?> hoverNotifier;
+  final ValueNotifier<List<LspErrors>> diagnosticsNotifier;
+  final ValueNotifier<bool> isHoveringPopup;
+  final _BackspaceNotifier backspaceNotifier;
+  final bool enableGutterDivider;
+
+  const _CodeField(
+    this.context,
+    this.editorTheme,
+    this.languade,
+    this.controller,
+    this.focusNode,
+    this.textStyle,
+    this.innerPadding,
+    this.vscrollController,
+    this.hscrollController,
+    this.lineWrap,
+    this.enableFolding,
+    this.readOnly,
+    this.enableGuideLines,
+    this.codeContent,
+    this.selectionStyle,
+    this.gutterStyle,
+    this.selectionNotifier,
+    this.aiNotifier,
+    this.aiOffsetNotifier,
+    this.offsetNotifier,
+    this.hoverNotifier,
+    this.diagnosticsNotifier,
+    this.isHoveringPopup,
+    this.backspaceNotifier,
+    this.enableGutterDivider
+  );
+
+  @override
+  RenderObject createRenderObject(BuildContext context) {
+    return _CodeFieldRenderer(
+      controller: controller,
+      editorTheme: editorTheme,
+      language: languade,
+      focusNode: focusNode,
+      textStyle: textStyle,
+      innerPadding: innerPadding,
+      vscrollController: vscrollController,
+      hscrollController: hscrollController,
+      lineWrap: lineWrap,
+      enableFolding: enableFolding,
+      enableGuideLines: enableGuideLines,
+      readOnly: readOnly,
+      codeContent: codeContent,
+      selectionStyle: selectionStyle,
+      gutterStyle: gutterStyle,
+      selectionNotifier: selectionNotifier,
+      aiNotifier: aiNotifier,
+      aiOffsetNotifier: aiOffsetNotifier,
+      offsetNotifier: offsetNotifier,
+      hoverNotifier: hoverNotifier,
+      diagnosticsNotifier: diagnosticsNotifier,
+      isHoveringPopup: isHoveringPopup,
+      backspaceNotifier: backspaceNotifier,
+      enableGutterDivider: enableGutterDivider
+    );
+  }
+
+  @override
+  void updateRenderObject(BuildContext context, covariant _CodeFieldRenderer renderObject) {
+    renderObject
+      .._controller = controller
+      ..editorTheme = editorTheme
+      ..language = languade
+      ..textStyle = textStyle
+      ..lineWrap = lineWrap
+      ..enableFolding = enableFolding
+      ..enableGuideLines = enableGuideLines
+      ..codeContent = codeContent
+      ..selectionStyle = selectionStyle
+      ..gutterStyle = gutterStyle
+      ..readOnly = readOnly
+      ..innerPadding = innerPadding;
+  }
+}
+
+class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation{
+  late TextPainter tp;
+  late Mode _language;
+  late double _caretHeight = 0.0;
+  late String _langId;
+  late double _gutterWidth;
+  late final bool _enableGutterDivider;
+  late final Paint _caretPainter;
+  late final CodeSelectionStyle _selectionStyle;
+  late final GutterStyle _gutterStyle;
+  late final ValueNotifier<bool> _selectionNotifier;
+  late final ValueNotifier<String?> _aiNotifier;
+  late final ValueNotifier<Offset?> _aiOffsetNotifier;
+  late final ValueNotifier<Offset> _offsetNotifier;
+  late final ValueNotifier<List<dynamic>?> _hoverNotifier;
+  late final ValueNotifier<List<LspErrors>> _diagnosticsNotifier;
+  late final TextPainter _tempTp;
+  final ValueNotifier<bool> _isHoveringPopup;
+  final List<double> _lineTops = [], _lineHeights = [];
+  final Map<int, List<InlineSpan>> _cachedSpans  =  {};
+  final Map<int, TextPainter> _lineTpCache = {};
+  final Map<int, String> _inFlightEdits = {};
+  final _dtap = DoubleTapGestureRecognizer();
+  final _oneTap = TapGestureRecognizer();
+  final FocusNode _focusNode;
+  final ScrollController _vscrollController, _hscrollController;
+  final bool isMobile = Platform.isAndroid || Platform.isIOS;
+  Offset _currerntPosition = Offset.zero;
+  bool _draggingStartHandle = false, _draggingEndHandle = false, _lineWrap;
+  bool _enableFolding, _enableGuideLines,  _draggingCHandle = false;
+  bool _showCaret = true, _showBubble = false, _readOnly = false;
+  List<String> _lines = [];
+  List<_Pair> _cachedBracketPairs = [];
+  List<FoldRange> _foldRanges = [];
+  List<LspErrors> _diagnostics = [];
+  CodeForgeController _controller;
+  Map<String, TextStyle> _editorTheme;
+  Offset _carretOffset;
+  Timer? _caretTimer;
+  TextStyle? _textStyle;
+  EdgeInsets? _innerPadding;
+  CodeContent? _codeContent;
+  TextSelection? _lastSelection, _lastSelectionForAi;
+  Rect? _startHandleRect, _endHandleRect, _normalHandle;
+  double _gutterPadding = 0.0;
+  String? _aiResponse, _lastProcessedText;
+  TextEditingValue? _prevValue;
+
+  _CodeFieldRenderer({
+    required Map<String, TextStyle> editorTheme,
+    required Mode language,
+    required CodeForgeController controller,
+    required FocusNode focusNode,
+    required TextStyle? textStyle,
+    required EdgeInsets? innerPadding,
+    required ScrollController vscrollController,
+    required ScrollController hscrollController,
+    required bool lineWrap,
+    required bool enableFolding,
+    required bool enableGuideLines,
+    required bool readOnly,
+    required CodeContent? codeContent,
+    required CodeSelectionStyle selectionStyle,
+    required GutterStyle gutterStyle,
+    required ValueNotifier<bool> selectionNotifier,
+    required ValueNotifier<String?> aiNotifier,
+    required ValueNotifier<Offset?> aiOffsetNotifier,
+    required ValueNotifier<Offset> offsetNotifier,
+    required ValueNotifier<List<dynamic>?> hoverNotifier,
+    required ValueNotifier<List<LspErrors>> diagnosticsNotifier,
+    required ValueNotifier<bool> isHoveringPopup,
+    required _BackspaceNotifier backspaceNotifier,
+    required bool enableGutterDivider
+  }):_editorTheme = editorTheme,
+    _controller = controller,
+    _carretOffset = Offset(0, 0),
+    _focusNode = focusNode,
+    _textStyle = textStyle,
+    _innerPadding = innerPadding,
+    _vscrollController = vscrollController,
+    _hscrollController = hscrollController,
+    _lineWrap = lineWrap,
+    _enableFolding = enableFolding,
+    _enableGuideLines = enableGuideLines,
+    _readOnly = readOnly,
+    _codeContent = codeContent,
+    _language = language,
+    _selectionStyle = selectionStyle,
+    _gutterStyle = gutterStyle,
+    _selectionNotifier = selectionNotifier,
+    _aiNotifier = aiNotifier,
+    _aiOffsetNotifier = aiOffsetNotifier,
+    _offsetNotifier = offsetNotifier,
+    _hoverNotifier = hoverNotifier,
+    _diagnosticsNotifier = diagnosticsNotifier,
+    _isHoveringPopup = isHoveringPopup,
+    _enableGutterDivider = enableGutterDivider,
+    _caretPainter = Paint()
+      ..color = selectionStyle.cursorColor ?? editorTheme['root']!.color!
+      ..style = PaintingStyle.fill
+    {
+
+      _tempTp = TextPainter(
+        text: TextSpan(
+          text: "8", style: _textStyle ?? editorTheme['root']
+        ),
+        textDirection: TextDirection.ltr
+      );
+
+      _tempTp.layout();
+
+      _gutterPadding = _tempTp.width * 2;
+      _gutterWidth = _gutterStyle.gutterWidth ?? 0.0;
+
+      _vscrollController.addListener((){
+        _selectionTimer?.cancel();
+        markNeedsPaint();
+      });
+
+      _hscrollController.addListener((){
+        _selectionTimer?.cancel();
+        markNeedsPaint();
+      });
+
+      backspaceNotifier.addListener(() {
+        final idx = backspaceNotifier.lineIndex;
+        final text = backspaceNotifier.lineText;
+        _showCaret = true;
+        if (idx == null) {
+          _inFlightEdits.clear();
+        } else {
+          _inFlightEdits[idx] = text;
+        }
+        _carretOffset = Offset(
+          backspaceNotifier.caretOffset?.dx ?? _carretOffset.dx,
+          _lineTops[backspaceNotifier.lineIndex ?? 0]
+        );
+        if (idx != null) _cachedSpans.remove(idx);
+        markNeedsPaint();
+      });
+
+      _focusNode.addListener(markNeedsPaint);
+
+      String lastText = _controller.text;
+
+      _controller.addListener((){
+        final prevValue = _prevValue;
+        final currValue = _controller.value;
+        final newText = _controller.text;
+        final oldLines = lastText.split('\n');
+        final newLines = newText.split('\n');
+        final changedLines = _findChangedLines(oldLines, newLines);
+        _lines = newLines;
+        _cachedBracketPairs = _computeBracketPairs(newText);
+        
+        for (final i in changedLines) {
+          _cachedSpans.remove(i);
+        }
+        lastText = newText;
+
+        if (prevValue != null && 
+            currValue.text.length != prevValue.text.length &&
+            currValue.selection.isCollapsed) {
+          final cursorLine = _getLineAtOffset(currValue.selection.extentOffset);
+          _autoUnfoldOnEdit(cursorLine);
+        }
+
+        if (prevValue != null &&
+            currValue.selection.start != currValue.selection.end) {
+          final startLine = _getLineAtOffset(currValue.selection.start);
+          final endLine = _getLineAtOffset(currValue.selection.end);
+          _autoUnfoldOnSelection(startLine, endLine);
+        }
+
+        final oldFoldRanges = Map.fromEntries(
+          _foldRanges.map((f) => MapEntry('{f.startIndex}-{f.endIndex}', f))
+        );
+        final newFoldRanges = _getFoldRanges(_lines);
+
+        for (final newFold in newFoldRanges) {
+          final key = '{newFold.startIndex}-{newFold.endIndex}';
+          if (oldFoldRanges.containsKey(key)) {
+            final oldFold = oldFoldRanges[key]!;
+            newFold.isFolded = oldFold.isFolded;
+
+            for (final oldChild in oldFold.originallyFoldedChildren) {
+              final childKey = '{oldChild.startIndex}-{oldChild.endIndex}';
+              final matchingChild = newFoldRanges.firstWhere(
+                (f) => '{f.startIndex}-{f.endIndex}' == childKey,
+                orElse: () => FoldRange(-1, -1)
+              );
+              if (matchingChild.startIndex != -1 && 
+                  matchingChild.startIndex > newFold.startIndex && 
+                  matchingChild.endIndex <= newFold.endIndex) {
+                newFold.addOriginallyFoldedChild(matchingChild);
+              }
+            }
+          }
+        }
+        _foldRanges = newFoldRanges;
+        
+        _gutterWidth = _gutterStyle.gutterWidth ??
+          ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+        _showCaret = true;
+        _caretTimer?.cancel();
+        _caretTimer = Timer.periodic(Duration(milliseconds: 500),(timer) {
+          _showCaret = !_showCaret;
+          markNeedsPaint();
+        });
+
+        final cursorPosition = _controller.selection.extentOffset.clamp(0, _controller.text.length);
+        final textBeforeCursor = _controller.text.substring(0, cursorPosition);
+        final lastTypedChar = textBeforeCursor.isNotEmpty
+          ? textBeforeCursor[textBeforeCursor.length - 1].replaceAll("\n", '')
+          : '';
+          
+        if (_lastProcessedText == newText &&
+            _aiResponse != null &&
+            _aiResponse!.isNotEmpty &&
+            _lastSelectionForAi != _controller.selection)
+          {
+          _aiNotifier.value = null;
+          _aiOffsetNotifier.value = null;
+        }
+        _lastSelectionForAi = _controller.selection;
+
+        
+
+        if (_aiResponse != null && _aiResponse!.isNotEmpty && lastTypedChar.isNotEmpty) {
+          if (_aiResponse![0] == lastTypedChar) {
+            _aiResponse = _aiResponse!.substring(1);
+            if (_aiResponse!.isEmpty) {
+              _aiNotifier.value = null;
+              _aiOffsetNotifier.value = null;
+            }
+          } else {
+            _aiNotifier.value = null;
+            _aiOffsetNotifier.value = null;
+          }
+        }
+        
+        if(
+          currValue.text == prevValue?.text &&
+          currValue.selection.extentOffset != prevValue?.selection.extentOffset
+        ){
+            _showBubble = true;
+            return;
+        } else {
+          _showBubble = false;
+        }
+
+        _prevValue = currValue;
+
+        if (_lastProcessedText == newText) return;
+        _lastProcessedText = newText;
+      });
+
+      _aiNotifier.addListener((){
+        _aiResponse = _aiNotifier.value;
+        _aiOffsetNotifier.value = _codeContent?.caretOffset;
+        markNeedsLayout();
+        markNeedsPaint();
+      });
+
+      _langId = language.hashCode.toString();
+      highlight.registerLanguage(_langId, _language);
+
+      _diagnosticsNotifier.addListener((){
+        _diagnostics = _diagnosticsNotifier.value;
+      });
+  }
+
+  Map<String, TextStyle> get editorTheme => _editorTheme;
+
+  set codeContent(CodeContent? cc){
+    if(cc == null) return;
+    if(cc.hashCode == _codeContent.hashCode) return;
+    
+    _codeContent = cc;
+    tp = _codeContent?.tp ?? TextPainter(textDirection: TextDirection.ltr);
+    final tpWidth = _lineWrap
+        ? size.width - (_innerPadding?.left ?? 0) - (_innerPadding?.right ?? 0)
+        : double.infinity;
+    tp.layout(maxWidth: tpWidth);
+    _carretOffset = cc.caretOffset;
+    _caretHeight = tp.getFullHeightForCaret(
+      TextPosition(offset: cc.currentSelection.extentOffset),
+      Rect.zero
+    );
+
+    if (_lastSelection != _controller.selection) {
+      _lastSelection = _controller.selection;
+      markNeedsPaint();
+      _ensureCaretVisible();
+    }
+  }
+
+  set selectionStyle(CodeSelectionStyle selectionStyle){
+    if(identical(selectionStyle, _selectionStyle)) return;
+    _selectionStyle = selectionStyle;
+    markNeedsPaint();
+  }
+
+  set gutterStyle(GutterStyle gs){
+    if(identical(_gutterStyle, gs)) return;
+    _gutterStyle = _gutterStyle;
+    markNeedsPaint();
+  }
+
+  set enableFolding(bool fl){
+    if(_enableFolding == fl) return;
+    _enableFolding = fl;
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+  
+  set enableGuideLines(bool gl){
+    if(_enableGuideLines == gl) return;
+    _enableGuideLines = gl;
+    markNeedsPaint();
+  }
+
+  set lineWrap(bool lw){
+    if(lw == _lineWrap) return;
+    _lineWrap = lw;
+    markNeedsLayout();
+  }
+
+  set editorTheme(Map<String, TextStyle> et) {
+    if (identical(et, _editorTheme)) return;
+    _editorTheme = et;
+    
+    _tempTp.text = TextSpan(
+      text: "8", 
+      style: _textStyle ?? _editorTheme['root']
+    );
+    _tempTp.layout();
+    
+    _gutterPadding = _tempTp.width * 2;
+    _gutterWidth = _gutterStyle.gutterWidth ?? 
+      ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+    
+    _lineTpCache.clear();
+    _cachedSpans.clear();
+    
+    markNeedsLayout();
+  }
+
+  set language(Mode lang){
+    if(identical(lang, _language)) return;
+    _language = lang;
+    _langId = lang.hashCode.toString();
+    highlight.registerLanguage(_langId, lang);
+    markNeedsPaint();
+  }
+
+  set innerPadding(EdgeInsets? p){
+    if(identical(p, _innerPadding)) return;
+    _innerPadding = p;
+    markNeedsLayout();
+  }
+
+  set readOnly(bool ro) {
+    if (_readOnly == ro) return;
+    _readOnly = ro;
+    
+    // Close text input connection when readonly
+    if (_readOnly && _controller.connection != null) {
+      _controller.connection?.close();
+      _controller.connection = null;
+    }
+    
+    markNeedsPaint();
+  }
+
+  set textStyle(TextStyle? ts){
+      if(identical(ts, _textStyle)) return;
+      _textStyle = ts;
+      
+      _tempTp.text = TextSpan(
+        text: "8", 
+        style: _textStyle ?? _editorTheme['root']
+      );
+      _tempTp.layout();
+      
+      _gutterPadding = _tempTp.width * 2;
+      _gutterWidth = _gutterStyle.gutterWidth ?? 
+        ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+      
+      _lineTpCache.clear();
+      _cachedSpans.clear();
+      
+      markNeedsLayout();
+      markNeedsPaint();
+    }
+
+  List<int> _findChangedLines(List<String> oldLines, List<String> newLines) {
+    final changed = <int>[];
+    final maxLen = max(oldLines.length, newLines.length);
+    for (int i = 0; i < maxLen; i++) {
+      final oldLine = i < oldLines.length ? oldLines[i] : '';
+      final newLine = i < newLines.length ? newLines[i] : '';
+      if (oldLine != newLine) {
+        changed.add(i);
+      }
+    }
+    return changed;
+  }
+
+  List<TextSpan> _convert(
+    List<Node> nodes, [
+    int startOffset = 0,
+  ]) {
+    List<TextSpan> spans = [];
+    int offset = startOffset;
+
+    for (final node in nodes) {
+      if (node.value != null) {
+        final nodeLines = node.value!.split('\n');
+        for (int lineIdx = 0; lineIdx < nodeLines.length; lineIdx++) {
+          final line = nodeLines[lineIdx];
+          if (line.isNotEmpty) {
+            spans.add(TextSpan(
+              text: line,
+              style: editorTheme[node.className ?? ''],
+            ));
+          }
+          if (lineIdx != nodeLines.length - 1) {
+            spans.add(const TextSpan(text: '\n'));
+          }
+        }
+        offset += node.value!.length;
+      } else if (node.children != null) {
+        final inner = _convert(node.children!, offset);
+        spans.add(TextSpan(
+          children: inner,
+          style: editorTheme[node.className ?? ''],
+        ));
+        offset += _textLengthFromSpans(inner);
+      }
+    }
+
+    return spans;
+  }
+
+  int _textLengthFromSpans(List<InlineSpan> spans) {
+    int length = 0;
+    for (final span in spans) {
+      if (span is TextSpan && span.text != null) {
+        length += span.text!.length;
+      }
+      if (span is TextSpan && span.children != null) {
+        length += _textLengthFromSpans(span.children!);
+      }
+    }
+    return length;
+  }
+
+  List<InlineSpan> _applyBracketHighlight(
+    List<InlineSpan> spans,
+    int lineStart,
+    int? b1,
+    int? b2,
+    Set<int> unmatched,
+  ) {
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+
+        if (text != null) {
+          bool needsHighlighting = false;
+          for (int i = 0; i < text.length; i++) {
+            final globalIdx = offset + i;
+            if (unmatched.contains(globalIdx) || globalIdx == b1 || globalIdx == b2) {
+              needsHighlighting = true;
+              break;
+            }
+          }
+
+          if (needsHighlighting) {
+            List<TextSpan> charSpans = [];
+            for (int i = 0; i < text.length; i++) {
+              final globalIdx = offset + i;
+              TextStyle? charStyle = span.style;
+
+              if (unmatched.contains(globalIdx)) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  color: Colors.red,
+                  decoration: TextDecoration.underline,
+                  decorationStyle: TextDecorationStyle.wavy,
+                );
+              } else if (globalIdx == b1 || globalIdx == b2) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  background: Paint()
+                    ..style = PaintingStyle.stroke
+                    ..strokeWidth = 1.2
+                    ..color = editorTheme['root']?.color ?? Colors.white,
+                );
+              }
+
+              charSpans.add(TextSpan(text: text[i], style: charStyle));
+            }
+            result.add(TextSpan(children: charSpans));
+          } else {
+            result.add(span);
+          }
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applyBracketHighlight(children, offset, b1, b2, unmatched);
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += _textLengthFromSpans(childSpans);
+        }
+      }
+    }
+    return result;
+  }
+  
+  List<InlineSpan> _applyDiagnosticsStyling(
+    List<InlineSpan> spans,
+    int lineIndex,
+    int lineStart,
+  ) {
+    if (_diagnostics.isEmpty) return spans;
+    
+    final lineDiagnostics = _diagnostics.where((diag) {
+      final startLine = diag.range['start']['line'] as int;
+      final endLine = diag.range['end']['line'] as int;
+      return lineIndex >= startLine && lineIndex <= endLine;
+    }).toList();
+    
+    if (lineDiagnostics.isEmpty) return spans;
+    
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+    
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+        
+        if (text != null) {
+          int spanStart = offset;
+          int spanEnd = offset + text.length;
+          
+          bool hasDiagnostic = false;
+          Color? diagnosticColor;
+          
+          for (final diag in lineDiagnostics) {
+            final diagStartLine = diag.range['start']['line'] as int;
+            final diagEndLine = diag.range['end']['line'] as int;
+            final diagStartChar = diag.range['start']['character'] as int;
+            final diagEndChar = diag.range['end']['character'] as int;
+            
+            int diagStart, diagEnd;
+            
+            if (diagStartLine == lineIndex && diagEndLine == lineIndex) {
+              diagStart = lineStart + diagStartChar;
+              diagEnd = lineStart + diagEndChar;
+            } else if (diagStartLine == lineIndex) {
+              diagStart = lineStart + diagStartChar;
+              diagEnd = spanEnd;
+            } else if (diagEndLine == lineIndex) {
+              diagStart = lineStart;
+              diagEnd = lineStart + diagEndChar;
+            } else {
+              diagStart = lineStart;
+              diagEnd = spanEnd;
+            }
+            
+            if (!(spanEnd <= diagStart || spanStart >= diagEnd)) {
+              hasDiagnostic = true;
+              diagnosticColor = switch (diag.severity) {
+                1 => Colors.red,
+                2 => Colors.amber,
+                3 => Colors.blueAccent,
+                _ => null,
+              };
+              break;
+            }
+          }
+          
+          if (hasDiagnostic && diagnosticColor != null) {
+            List<TextSpan> charSpans = [];
+            
+            for (int i = 0; i < text.length; i++) {
+              final globalIdx = spanStart + i;
+              bool inDiagnostic = false;
+              Color? charDiagColor;
+              
+              for (final diag in lineDiagnostics) {
+                final diagStartLine = diag.range['start']['line'] as int;
+                final diagEndLine = diag.range['end']['line'] as int;
+                final diagStartChar = diag.range['start']['character'] as int;
+                final diagEndChar = diag.range['end']['character'] as int;
+                
+                int diagStart, diagEnd;
+                
+                if (diagStartLine == lineIndex && diagEndLine == lineIndex) {
+                  diagStart = lineStart + diagStartChar;
+                  diagEnd = lineStart + diagEndChar;
+                } else if (diagStartLine == lineIndex) {
+                  diagStart = lineStart + diagStartChar;
+                  diagEnd = lineStart + text.length;
+                } else if (diagEndLine == lineIndex) {
+                  diagStart = lineStart;
+                  diagEnd = lineStart + diagEndChar;
+                } else {
+                  diagStart = lineStart;
+                  diagEnd = lineStart + text.length;
+                }
+                
+                if (globalIdx >= diagStart && globalIdx < diagEnd) {
+                  inDiagnostic = true;
+                  charDiagColor = switch (diag.severity) {
+                    1 => Colors.red,
+                    2 => Colors.amber,
+                    3 => Colors.blueAccent,
+                    _ => null,
+                  };
+                  break;
+                }
+              }
+              
+              TextStyle? charStyle = span.style;
+              if (inDiagnostic && charDiagColor != null) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  decoration: TextDecoration.underline,
+                  decorationStyle: TextDecorationStyle.wavy,
+                  decorationThickness: 2,
+                  decorationColor: charDiagColor,
+                );
+              }
+              
+              charSpans.add(TextSpan(text: text[i], style: charStyle));
+            }
+            
+            result.add(TextSpan(children: charSpans));
+          } else {
+            result.add(span);
+          }
+          
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applyDiagnosticsStyling(children, lineIndex, offset);
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += _textLengthFromSpans(childSpans);
+        }
+      }
+    }
+    
+    return result;
+  }
+
+  List<InlineSpan> _applySelectionToSpans(
+    List<InlineSpan> spans,
+    int lineStart,
+    int selectionStart,
+    int selectionEnd,
+    Color selectedColor,
+  ) {
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+  
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+  
+        if (text != null) {
+          int spanStart = offset;
+          int spanEnd = offset + text.length;
+  
+          if (selectionEnd <= spanStart || selectionStart >= spanEnd) {
+            result.add(span);
+          } else {
+            int selStartInSpan = max(selectionStart - spanStart, 0);
+            int selEndInSpan = min(selectionEnd - spanStart, text.length);
+  
+            if (selStartInSpan > 0) {
+              result.add(TextSpan(
+                text: text.substring(0, selStartInSpan),
+                style: span.style,
+              ));
+            }
+            result.add(TextSpan(
+              text: text.substring(selStartInSpan, selEndInSpan),
+              style: span.style?.copyWith(
+                backgroundColor: selectedColor
+              ) ?? TextStyle(backgroundColor: _selectionStyle.selectionColor),
+            ));
+            if (selEndInSpan < text.length) {
+              result.add(TextSpan(
+                text: text.substring(selEndInSpan),
+                style: span.style,
+              ));
+            }
+          }
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applySelectionToSpans(
+            children,
+            offset,
+            selectionStart,
+            selectionEnd,
+            selectedColor,
+          );
+          final childrenLength = childSpans.fold<int>(0, (sum, s) {
+            if (s is TextSpan && s.text != null) {
+              return sum + s.text!.length;
+            }
+            return sum;
+          });
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += childrenLength;
+        }
+      }
+    }
+    return result;
+  }
+
+  Set<int> _findUnmatchedBrackets(String text) {
+    final stack = <int>[];
+    final unmatched = <int>{};
+    const pairs = {'(': ')', '{': '}', '[': ']', "'": "'", '"': '"'};
+    const openers = {'(', '{', '[', "'", '"'};
+    const closers = {')', '}', ']', "'", '"'};
+    String? currentStringQuote;
+
+    for (int i = 0; i < text.length; i++) {
+      final char = text[i];
+
+      if (char == '"' || char == "'") {
+        if (currentStringQuote == null) {
+          currentStringQuote = char;
+          stack.add(i);
+        } else if (currentStringQuote == char) {
+          if (stack.isNotEmpty && text[stack.last] == char) {
+            stack.removeLast();
+            currentStringQuote = null;
+          } else {
+            unmatched.add(i);
+          }
+        } else {
+          continue;
+        }
+        continue;
+      }
+
+      if (currentStringQuote != null) continue;
+
+      if (openers.contains(char)) {
+        stack.add(i);
+      } else if (closers.contains(char)) {
+        if (stack.isEmpty) {
+          unmatched.add(i);
+        } else {
+          final lastOpen = stack.last;
+          final openChar = text[lastOpen];
+          if (pairs[openChar] == char) {
+            stack.removeLast();
+          } else {
+            unmatched.add(i);
+          }
+        }
+      }
+    }
+
+    unmatched.addAll(stack);
+    
+    return unmatched;
+  }
+
+  int? _findMatchingBracket(String text, int pos) {
+    const Map<String, String> pairs = {
+      '(': ')',
+      '{': '}',
+      '[': ']',
+      ')': '(',
+      '}': '{',
+      ']': '[',
+    };
+    const String openers = '({[';
+
+    if (pos < 0 || pos >= text.length) return null;
+
+    final char = text[pos];
+    if (!pairs.containsKey(char)) return null;
+
+    final match = pairs[char]!;
+    final isForward = openers.contains(char);
+
+    int depth = 0;
+    if (isForward) {
+      for (int i = pos + 1; i < text.length; i++) {
+        if (text[i] == char) depth++;
+        if (text[i] == match) {
+          if (depth == 0) return i;
+          depth--;
+        }
+      }
+    } else {
+      for (int i = pos - 1; i >= 0; i--) {
+        if (text[i] == char) depth++;
+        if (text[i] == match) {
+          if (depth == 0) return i;
+          depth--;
+        }
+      }
+    }
+    return null;
+  }
+
+  int _findFirstVisibleLine(double viewTop) {
+    if(_lineTops.isEmpty) return 0;
+    int low = 0, high = _lineTops.length - 1, mid;
+    while (low < high) {
+      mid = (low + high) >> 1;
+      if (_lineTops[mid] < viewTop) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low.clamp(0, _lineTops.length - 1);
+  }
+
+  int _findLastVisibleLine(double viewBottom) {
+    if (_lineTops.isEmpty) return 0;
+    int low = 0, high = _lineTops.length - 1, mid;
+    while (low < high) {
+      mid = (low + high + 1) >> 1;
+      if (_lineTops[mid] <= viewBottom) {
+        low = mid;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return low.clamp(0, _lineTops.length - 1);
+  }
+
+  List<_Pair> _computeBracketPairs(String text) {
+    final pairs = <_Pair>[];
+    final stack = <int>[];
+    const openers = {'(', '{', '['};
+    const closers = {')', '}', ']'};
+    const matching = {'(': ')', '{': '}', '[': ']'};
+
+    for (int i = 0; i < text.length; i++) {
+      final ch = text[i];
+      if (openers.contains(ch)) {
+        stack.add(i);
+      } else if (closers.contains(ch)) {
+        if (stack.isNotEmpty) {
+          final open = stack.removeLast();
+          final openChar = text[open];
+          if (matching[openChar] == ch) {
+            pairs.add(_Pair(open, i));
+          }
+        }
+      }
+    }
+    return pairs;
+  }
+
+  Map<String,int> _indexToLineCol(int idx, List<int> lineStarts, List<String> lines) {
+    int low = 0, high = lineStarts.length - 1;
+    while (low <= high) {
+      int mid = (low + high) >> 1;
+      if (lineStarts[mid] <= idx) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    final int line = high.clamp(0, lineStarts.length - 1);
+    final int col = idx - lineStarts[line];
+    return {'line': line, 'col': col};
+  }
+
+  TextPainter _getLinePainter(int line, List<InlineSpan> baseSpans, double maxWidth, TextStyle defaultStyle) {
+    final cached = _lineTpCache[line];
+    if (cached != null) return cached;
+    final tpLine = TextPainter(
+      text: TextSpan(style: defaultStyle, children: baseSpans),
+      textDirection: TextDirection.ltr,
+    );
+    tpLine.layout(maxWidth: maxWidth);
+    _lineTpCache[line] = tpLine;
+    return tpLine;
+  }
+
+  Set<int> _findUnmatchedQuotesInLine(String lineText, int lineStartOffset) {
+    final unmatched = <int>{};
+    int? unclosedStringStart;
+
+    for (int i = 0; i < lineText.length; i++) {
+      final char = lineText[i];
+      final globalIdx = lineStartOffset + i;
+
+      if (char == '"' || char == "'") {
+        if (unclosedStringStart == null) {
+          unclosedStringStart = globalIdx;
+        } else {
+          final openingQuoteChar = lineText[unclosedStringStart - lineStartOffset];
+          if (openingQuoteChar == char) {
+            unclosedStringStart = null;
+          }
+        }
+        continue;
+      }
+    }
+
+    if (unclosedStringStart != null) {
+      for (int i = (unclosedStringStart - lineStartOffset); i < lineText.length; i++) {
+        unmatched.add(lineStartOffset + i);
+      }
+    }
+    
+    return unmatched;
+  }
+
+  List<FoldRange> _getFoldRanges(List<String> lines) {
+    List<FoldRange> foldRanges = [];
+    if (!_enableFolding) return foldRanges;
+    
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      if (line.trim().isEmpty || !line.trim().endsWith(':')) continue;
+      
+      final startIndent = line.length - line.trimLeft().length;
+      int j = i + 1;
+      
+      while (j < lines.length) {
+        final next = lines[j];
+        if (next.trim().isEmpty) {
+          j++;
+          continue;
+        }
+        final nextIndent = next.length - next.trimLeft().length;
+        if (nextIndent <= startIndent) break;
+        j++;
+      }
+      
+      if (j > i + 1 && j <= lines.length) {
+        foldRanges.add(FoldRange(i, j - 1));
+      }
+    }
+    
+    final Map<String, List<int>> stacks = {"{": [], "[": [], "(": []};
+    const Map<String, String> matchingBrackets = {"{": "}", "[": "]", "(": ")"};
+    
+    for (final openBracket in matchingBrackets.keys) {
+      final closeBracket = matchingBrackets[openBracket]!;
+      for (int i = 0; i < lines.length; i++) {
+        if (lines[i].contains(openBracket)) stacks[openBracket]!.add(i);
+        if (lines[i].contains(closeBracket)) {
+          if (stacks[openBracket]!.isNotEmpty) {
+            int start = stacks[openBracket]!.removeLast();
+            if (i > start) {
+              bool conflictsWithColonFold = foldRanges.any((fold) => 
+                (fold.startIndex == start && fold.endIndex == i) ||
+                (fold.startIndex == start) ||
+                (fold.endIndex == i && fold.startIndex < start)
+              );
+              
+              if (!conflictsWithColonFold) {
+                foldRanges.add(FoldRange(start, i));
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    foldRanges.sort((a, b) => a.startIndex.compareTo(b.startIndex));
+    
+    return foldRanges;
+  }
+
+  Map<String, int> _offsetToLineChar(int offset) {
+    final lines = _controller.text.split('\n');
+    int accum = 0;
+    for (int i = 0; i < lines.length; i++) {
+      final lineLen = lines[i].length;
+      if (offset >= accum && offset <= accum + lineLen) {
+        return {
+          'line': i,
+          'character': offset - accum,
+        };
+      }
+      accum += lineLen + 1;
+    }
+    final last = lines.length - 1;
+    return {
+      'line': last,
+      'character': lines.isNotEmpty ? lines.last.length : 0,
+    };
+  }
+
+  bool _isOffsetOverWord(int offset) {
+    final text = _controller.text;
+    if (offset < 0 || offset >= text.length) return false;
+    return RegExp(r'\w').hasMatch(text[offset]);
+  }
+
+  int _getGlobalPositionFromVisible(int visiblePosition) {
+    final lines = _controller.text.split('\n');
+    int visibleOffset = 0;
+    int globalOffset = 0;
+
+    for (int i = 0; i < lines.length; i++) {
+      final isFolded = _foldRanges.any((fold) => 
+        fold.isFolded && i > fold.startIndex && i <= fold.endIndex);
+
+      if (!isFolded) {
+        final lineLength = lines[i].length;
+        if (visiblePosition >= visibleOffset && visiblePosition <= visibleOffset + lineLength) {
+          return globalOffset + (visiblePosition - visibleOffset);
+        }
+        visibleOffset += lineLength + 1;
+        globalOffset += lineLength + 1;
+      } else {
+        globalOffset += lines[i].length + 1;
+      }
+    }
+    return globalOffset;
+  }
+
+  bool _isWordBoundary(String char) {
+    return char.trim().isEmpty || !RegExp(r'\w').hasMatch(char);
+  }
+
+  List<String> _buildDisplayLinesWithAI() {
+    if (_aiResponse != null && _aiResponse!.isNotEmpty && _controller.selection.isValid) {
+      final cursorPosition = _controller.selection.extentOffset;
+      final before = _controller.text.substring(0, cursorPosition);
+      final after = _controller.text.substring(cursorPosition);
+      return (before + _aiResponse! + after).split('\n');
+    } 
+    return _controller.text.split('\n');
+    
+  }
+
+  void _toggleFold(FoldRange fold) {
+    if (fold.isFolded) {
+      _unfoldWithChildren(fold);
+    } else {
+      _foldWithChildren(fold);
+    }
+    _controller.folds = _foldRanges;
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+
+  void _foldWithChildren(FoldRange parentFold) {
+    parentFold.clearOriginallyFoldedChildren();
+    
+    for (final childFold in _foldRanges) {
+      if (childFold.isFolded && 
+          childFold != parentFold &&
+          childFold.startIndex > parentFold.startIndex && 
+          childFold.endIndex <= parentFold.endIndex) {
+        parentFold.addOriginallyFoldedChild(childFold);
+        childFold.isFolded = false;
+      }
+    }
+    
+    parentFold.isFolded = true;
+  }
+
+  void _unfoldWithChildren(FoldRange parentFold) {
+    parentFold.isFolded = false;
+    for (final childFold in parentFold.originallyFoldedChildren) {
+      if (childFold.startIndex > parentFold.startIndex && 
+          childFold.endIndex <= parentFold.endIndex) {
+        childFold.isFolded = true;
+      }
+    }
+    parentFold.clearOriginallyFoldedChildren();
+  }
+
+  int _getLineAtOffset(int offset) {
+    final text = _controller.text;
+    final beforeCursor = text.substring(0, offset.clamp(0, text.length));
+    return beforeCursor.split('\n').length - 1;
+  }
+  
+ void _autoUnfoldOnEdit(int lineIndex) {
+  bool needsUpdate = false;
+  
+  for (final fold in _foldRanges) {
+    if (fold.isFolded && 
+        (fold.startIndex == lineIndex || 
+         (lineIndex > fold.startIndex && lineIndex <= fold.endIndex))) {
+      fold.isFolded = false;
+      
+      for (final child in fold.originallyFoldedChildren) {
+        child.isFolded = true;
+      }
+      fold.clearOriginallyFoldedChildren();
+      
+      needsUpdate = true;
+    }
+  }
+  
+  if (needsUpdate) {
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+}
+
+  void _autoUnfoldOnSelection(int startLine, int endLine) {
+    bool needsUpdate = false;
+    
+    for (final fold in _foldRanges) {
+      if (!fold.isFolded) continue;
+      
+      final selectionAffectsFold = 
+        (startLine <= fold.startIndex && endLine >= fold.startIndex) ||
+        (startLine <= fold.endIndex && endLine >= fold.endIndex) ||
+        (startLine > fold.startIndex && endLine <= fold.endIndex) ||
+        (startLine >= fold.startIndex && startLine <= fold.endIndex) ||
+        (endLine >= fold.startIndex && endLine <= fold.endIndex);
+      
+      if (selectionAffectsFold) {
+        fold.isFolded = false;
+        
+        for (final child in fold.originallyFoldedChildren) {
+          child.isFolded = true;
+        }
+        fold.clearOriginallyFoldedChildren();
+        
+        needsUpdate = true;
+      }
+    }
+    
+    if (needsUpdate) {
+      markNeedsLayout();
+      markNeedsPaint();
+    }
+  }
+
+  void _drawIndentationGuidelines(Canvas canvas, Offset offset, List<String> displayLines, int firstVisibleLine, int lastVisibleLine, double maxLinePainterWidth) {
+    if (!_enableGuideLines) return;
+    
+    final tempMeasure = TextPainter(
+      text: TextSpan(
+        text: " ",
+        style: _textStyle ?? _editorTheme['root']
+      ),
+      textDirection: TextDirection.ltr
+    );
+    tempMeasure.layout();
+
+    final double charWidth = tempMeasure.width;
+    final viewTop = _vscrollController.offset;
+    final viewBottom = viewTop + _vscrollController.position.viewportDimension;
+    final cursorPosition = _controller.selection.extentOffset;
+    final textBeforeCursor = _controller.text.substring(0, cursorPosition.clamp(0, _controller.text.length));
+    final currentLine = textBeforeCursor.split('\n').length - 1;
+    final tabSize = 4;
+    List<({int startLine, int endLine, int indentLevel})> blocks = [];
+    
+    for (int i = 0; i < displayLines.length; i++) {
+      if (_foldRanges.any((fold) => fold.isFolded && i > fold.startIndex && i <= fold.endIndex)) {
+        continue;
+      }
+      
+      final line = displayLines[i];
+      if (!line.trimRight().endsWith(':')) continue;
+      
+      final indent = line.length - line.trimLeft().length;
+      final indentLevel = indent ~/ tabSize;
+      
+      int endLine = i + 1;
+      while (endLine < displayLines.length) {
+        final nextLine = displayLines[endLine];
+        if (nextLine.trim().isEmpty) {
+          endLine++;
+          continue;
+        }
+        final nextIndent = nextLine.length - nextLine.trimLeft().length;
+        if (nextIndent <= indent) break;
+        endLine++;
+      }
+      
+      if (endLine <= i + 1) continue;
+      if (i + 1 >= _lineTops.length || endLine - 1 >= _lineTops.length || endLine - 1 >= _lineHeights.length) continue;
+      
+      blocks.add((startLine: i, endLine: endLine, indentLevel: indentLevel));
+    }
+    
+    int? selectedBlockIndex;
+    int minBlockSize = 999999;
+    
+    for (int idx = 0; idx < blocks.length; idx++) {
+      final block = blocks[idx];
+      if (currentLine >= block.startLine && currentLine < block.endLine) {
+        final blockSize = block.endLine - block.startLine;
+        if (blockSize < minBlockSize) {
+          minBlockSize = blockSize;
+          selectedBlockIndex = idx;
+        }
+      }
+    }
+    
+    for (int idx = 0; idx < blocks.length; idx++) {
+      final block = blocks[idx];
+      final isSelected = selectedBlockIndex == idx;
+      
+      final Paint guidePaint = Paint()
+        ..color = isSelected
+            ? (_editorTheme['root']?.color ?? Colors.grey)
+            : (_editorTheme['root']?.color ?? Colors.grey).withAlpha(100)
+        ..strokeWidth = isSelected ? 0.7 : 0.3
+        ..style = PaintingStyle.stroke;
+      
+      final double yTop = offset.dy
+        + (_innerPadding?.top ?? 0)
+        + _lineTops[block.startLine + 1]
+        - _vscrollController.offset;
+      
+      final double yBottom = offset.dy
+        + (_innerPadding?.top ?? 0)
+        + _lineTops[block.endLine - 1]
+        + _lineHeights[block.endLine - 1]
+        - _vscrollController.offset;
+      
+      if (yBottom < 0 || yTop > viewBottom) continue;
+      
+      final double guideX = offset.dx
+        + _gutterWidth
+        + (_innerPadding?.left ?? 0)
+        + ((block.indentLevel * charWidth) * tabSize)
+        - (_lineWrap ? 0 : _hscrollController.offset);
+      
+      final double clampedYTop = yTop.clamp(0.0, viewBottom);
+      final double clampedYBottom = yBottom.clamp(0.0, viewBottom);
+      
+      if (guideX >= _gutterWidth && guideX <= size.width) {
+        canvas.drawLine(
+          Offset(guideX, clampedYTop),
+          Offset(guideX, clampedYBottom),
+          guidePaint
+        );
+      }
+    }
+  }
+  
+  @override
+  bool hitTestSelf(Offset position) => true;
+
+  int? _dragStartOffset;
+  Timer? _selectionTimer, _hoverTimer;
+  bool _selectionActive = false, _isDragging = false;
+  Offset? _pointerDownPosition;
+
+  @override
+  void handleEvent(PointerEvent event, covariant BoxHitTestEntry entry) {
+    final localPosition = event.localPosition;
+    _currerntPosition = localPosition;
+    final padded = Offset(
+      localPosition.dx
+        - (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+        + _hscrollController.offset
+        - _gutterWidth,
+      localPosition.dy
+        - (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+        + _vscrollController.offset
+    );
+    TextPosition offset = _codeContent?.tp.getPositionForOffset(padded)
+    ?? TextPosition(offset: _controller.selection.extentOffset);
+
+    final globalOffset = _getGlobalPositionFromVisible(offset.offset);
+    if (globalOffset != -1) {
+      offset = TextPosition(offset: globalOffset);
+    }
+
+    if(event is PointerHoverEvent){
+      if(!(_hoverNotifier.value != null && _isHoveringPopup.value)){
+        _hoverNotifier.value = null;
+      }
+      
+      if(
+        (_hoverNotifier.value == null || !_isHoveringPopup.value) &&
+        _isOffsetOverWord(offset.offset)
+        ){
+        _hoverTimer?.cancel();
+        _hoverTimer = Timer(Duration(milliseconds: 1500), (){
+          final lineChar = _offsetToLineChar(offset.offset);
+          _hoverNotifier.value = [event.localPosition, lineChar];
+        });
+      } else {
+        _hoverNotifier.value = null;
+      }
+    }
+
+    void select(){
+      _selectionActive = _selectionNotifier.value = true;
+      final text = _controller.text;
+      final pos = offset.offset;
+      int start = pos, end = pos;
+      while (start > 0 && !_isWordBoundary(text[start - 1])) {
+        start--;
+      }
+      while (end < text.length && !_isWordBoundary(text[end])) {
+        end++;
+      }
+      _controller.selection = TextSelection(baseOffset: start, extentOffset: end);
+    }
+
+    if(
+      event is PointerDownEvent && event.buttons == kSecondaryButton ||
+      event is PointerUpEvent && isMobile && _selectionActive
+    ){
+      _offsetNotifier.value = event.localPosition;   
+    }
+
+    if (event is PointerDownEvent && event.buttons == kPrimaryButton) {
+      if(_offsetNotifier.value.dx > 0 || _offsetNotifier.value.dy > 0){
+        _offsetNotifier.value = Offset(-1, -1);
+      }
+
+      _dragStartOffset = offset.offset;
+      _dtap.addPointer(event);
+      _oneTap.addPointer(event);
+
+
+      if (isMobile) {
+        _dtap.onDoubleTap = (){
+          select();
+          _offsetNotifier.value = event.localPosition;
+        };
+
+        _oneTap.onTap = (){
+          if(_hoverNotifier.value != null) {
+            _hoverNotifier.value = null;
+          } else if(_isOffsetOverWord(offset.offset)) {
+            final lineChar = _offsetToLineChar(offset.offset);
+            _hoverNotifier.value = [localPosition, lineChar];
+          }
+        };
+
+        _draggingCHandle = false;
+        _draggingStartHandle = false;
+        _draggingEndHandle = false;
+        if (_controller.selection.baseOffset != _controller.selection.extentOffset) {
+          if (_startHandleRect?.contains(event.localPosition) ?? false) {
+            _draggingStartHandle = true;
+            _selectionActive = _selectionNotifier.value = true;
+            _pointerDownPosition = event.localPosition;
+            return;
+          }
+          if (_endHandleRect?.contains(event.localPosition) ?? false) {
+            _draggingEndHandle = true;
+            _selectionActive = _selectionNotifier.value = true;
+            _pointerDownPosition = event.localPosition;
+            return;
+          }
+        } else if(_normalHandle?.contains(event.localPosition) ?? false) {
+          _draggingCHandle = true;
+          _draggingStartHandle = _draggingEndHandle = false;
+          _selectionActive = _selectionNotifier.value = true;
+          _controller.selection = TextSelection.collapsed(offset: offset.offset);
+          _pointerDownPosition = event.localPosition;
+          return;
+        }
+
+        _dragStartOffset = offset.offset;
+        _isDragging = false;
+        _pointerDownPosition = event.localPosition;
+        _selectionActive = _selectionNotifier.value = false;
+        _selectionTimer?.cancel();
+        _selectionTimer = Timer(const Duration(milliseconds: 500), select);
+      } else{
+        _controller.selection = TextSelection.collapsed(offset: offset.offset);
+      }
+
+      for (final fold in _foldRanges) {
+        if (fold.startIndex >= _lineTops.length) continue;
+        final isInsideFoldedParent = _foldRanges.any(
+          (parent) => parent.isFolded && 
+                      parent.startIndex < fold.startIndex && 
+                      parent.endIndex >= fold.startIndex
+        );
+        
+        if (isInsideFoldedParent) continue;
+        
+        final iconRect = Rect.fromLTWH(
+          _gutterWidth - (_textStyle?.fontSize ?? 15) + (_innerPadding?.left ?? 0),
+          _lineTops[fold.startIndex] + (_innerPadding?.top ?? 0) - _vscrollController.offset,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+        );
+        
+        if (iconRect.contains(event.localPosition)) {
+          _toggleFold(fold);
+          return;
+        }
+      }
+    } 
+
+    if (event is PointerMoveEvent && _dragStartOffset != null) {
+      if(isMobile) {
+        final pos = _codeContent?.tp.getPositionForOffset(padded) ?? 
+            TextPosition(offset: _controller.selection.extentOffset);
+            
+        if (_draggingCHandle) {
+          _controller.selection = TextSelection.collapsed(offset: pos.offset);
+          markNeedsPaint();
+          return;
+        }
+
+        if (_draggingStartHandle || _draggingEndHandle) {
+          final base = _controller.selection.start;
+          final extent = _controller.selection.end;
+
+           if (_draggingStartHandle) {
+            final moving = pos.offset;
+
+            _controller.selection = TextSelection(
+              baseOffset: moving,
+              extentOffset: extent,
+            );
+
+            if (moving > extent) {
+              _draggingStartHandle = false;
+              _draggingEndHandle = true;
+            }
+          } else {
+            final moving = pos.offset;
+
+            _controller.selection = TextSelection(
+              baseOffset: base,
+              extentOffset: moving,
+            );
+
+            if (moving < base) {
+              _draggingEndHandle = false;
+              _draggingStartHandle = true;
+            }
+          }
+
+          markNeedsPaint();
+          return;
+        }
+
+        if (_dragStartOffset != null) {
+          if (isMobile) {
+            if ((event.localPosition - (_pointerDownPosition ?? event.localPosition)).distance > 10) {
+              _isDragging = true;
+            }
+            if (!_selectionActive) return;
+          }
+
+          _controller.selection = TextSelection(
+            baseOffset: _dragStartOffset!,
+            extentOffset: pos.offset,
+          );
+        }
+
+        if ((event.localPosition - _pointerDownPosition!).distance > 10) {
+          _isDragging = true;
+        }
+        if(!_selectionActive) return;
+      }
+      
+      final offset = _codeContent?.tp.getPositionForOffset(padded)
+        ?? TextPosition(offset: _controller.selection.extentOffset);
+  
+      _controller.selection = TextSelection(
+        baseOffset: _dragStartOffset!,
+        extentOffset: offset.offset,
+      );
+    }
+
+    if (event is PointerUpEvent || event is PointerCancelEvent) {
+      if(!_isDragging && isMobile && !_selectionActive){
+        _controller.selection = TextSelection.collapsed(offset: offset.offset);
+      }
+      _draggingStartHandle = false;
+      _draggingEndHandle = false;
+      _draggingCHandle = false;
+      _pointerDownPosition = null;
+      _dragStartOffset = null;
+      _selectionTimer?.cancel();
+      _selectionActive = _selectionNotifier.value = false;
+      if(_readOnly) return;
+      if(isMobile && !_isDragging){
+        _commonF(_controller);
+      } else if(!isMobile){
+        _controller.refresh();
+      }
+      _isDragging = false;
+    }
+
+    super.handleEvent(event, entry);
+  }
+
+  @override
+  void performLayout() {
+    final maxW = constraints.hasBoundedWidth ? constraints.maxWidth : 1000.0;
+    _lineTops.clear();
+    _lineHeights.clear();
+
+    List<String> displayLines = _buildDisplayLinesWithAI();
+
+    final defaultStyle = _textStyle ?? _editorTheme['root'];
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+
+    double y = 0;
+    double maxLineWidth = 0;
+    
+    for (int i = 0; i < displayLines.length; i++) {
+      bool isFolded = _foldRanges.any(
+        (fold) => 
+          fold.isFolded && i > fold.startIndex && i <= fold.endIndex
+        );
+      
+      if (isFolded) {
+        _lineTops.add(y);
+        _lineHeights.add(0);
+      } else {
+        tp.text = TextSpan(text: displayLines[i], style: defaultStyle);
+        final tpWidth = _lineWrap ? maxW - (_innerPadding?.horizontal ?? 0) - _gutterWidth : double.infinity;
+        tp.layout(maxWidth: tpWidth);
+        maxLineWidth = max(maxLineWidth, tp.width);
+        _lineTops.add(y);
+        _lineHeights.add(tp.height);
+        y += tp.height;
+      }
+    }
+
+    final contentWidth = maxLineWidth + (_innerPadding?.horizontal ?? 0);
+    final contentHeight = y + (_innerPadding?.vertical ?? 0);
+
+    size = constraints.constrain(Size(contentWidth, contentHeight));
+  }
+  
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    int? bracket1, bracket2;
+    final selection = _controller.selection;
+    final cursorPosition = selection.extentOffset;
+    String text = _lines.join('\n');
+    String controllerText = _controller.text;
+
+    if (cursorPosition >= 0 && cursorPosition <= text.length) {
+      final String? before = cursorPosition > 0
+          ? text[cursorPosition - 1]
+          : null;
+      final String? after = cursorPosition < text.length
+          ? text[cursorPosition]
+          : null;
+      final int? pos = (before != null && '{}[]()'.contains(before))
+          ? cursorPosition - 1
+          : (after != null && '{}[]()'.contains(after))
+          ? cursorPosition
+          : null;
+
+      if (pos != null) {
+        final match = _findMatchingBracket(text, pos);
+        if (match != null) {
+          bracket1 = pos;
+          bracket2 = match;
+        }
+      }
+    }
+
+    final canvas = context.canvas;
+    canvas.save();
+    canvas.drawPaint(
+      Paint()
+        ..color = _editorTheme['root']!.backgroundColor ?? Colors.transparent
+        ..style = PaintingStyle.fill
+    );
+    final defaultStyle = _textStyle ?? editorTheme['root'];
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+    final gutterPainter = TextPainter(textDirection: TextDirection.ltr);
+    final foldIconPainter = TextPainter(textDirection: TextDirection.ltr);
+
+    final unfoldIcon = _gutterStyle.unfoldedIcon; 
+    final foldIcon = _gutterStyle.foldedIcon;
+
+    final viewTop = _vscrollController.offset;
+    final viewBottom = viewTop + _vscrollController.position.viewportDimension;
+  
+    final selectedColor = _selectionStyle.selectionColor;
+  
+    final firstVisibleLine = _findFirstVisibleLine(viewTop);
+    final lastVisibleLine = _findLastVisibleLine(viewBottom);
+
+    List<String> displayLines;
+    if (_inFlightEdits.isNotEmpty) {
+      displayLines = controllerText.split('\n');
+      for (final entry in _inFlightEdits.entries) {
+        if (entry.key < displayLines.length) {
+          displayLines[entry.key] = entry.value;
+        }
+      }
+    } else {
+      displayLines = _buildDisplayLinesWithAI();
+    }
+
+    int aiStart = -1, aiEnd = -1;
+    if (_aiResponse != null && _aiResponse!.isNotEmpty && _controller.selection.isValid) {
+      aiStart = _controller.selection.extentOffset;
+      aiEnd = aiStart + _aiResponse!.length;
+      _controller.isShowingAiSuggestion = true;
+    }
+
+    final Set<int> unmatchedBrackets = _findUnmatchedBrackets(text).where((index) {
+      final char = text[index];
+      return '{}[]()'.contains(char);
+    }).toSet();
+
+    if (displayLines.isNotEmpty && _lineTops.isNotEmpty) {
+      int spanOffset = 0;
+      for (int i = 0; i < displayLines.length; i++) {
+        final displayText = displayLines[i];
+        final lineLength = displayText.length;
+        final lineStart = spanOffset;
+        final lineEnd = spanOffset + lineLength;
+        
+        if (i >= _lineTops.length ||
+            i < firstVisibleLine ||
+            i > lastVisibleLine ||
+            _foldRanges.any(
+              (item)=> item.startIndex < i && item.endIndex >= i && item.isFolded
+            )
+        ) {
+          spanOffset += lineLength + 1;
+          continue;
+        }
+        
+        final contentTop = _lineTops[i];
+
+        late List<InlineSpan> lineSpans;
+
+        if (aiStart >= 0 && aiEnd > aiStart && lineEnd > aiStart && lineStart < aiEnd) {
+          final aiLineStart = max(aiStart, lineStart) - lineStart;
+          final aiLineEnd = min(aiEnd, lineEnd) - lineStart;
+          final beforeAI = displayText.substring(0, aiLineStart);
+          final aiText = displayText.substring(aiLineStart, aiLineEnd);
+          final afterAI = displayText.substring(aiLineEnd);
+
+          final beforeSpans = _convert(
+            highlight.parse(beforeAI, language: _langId).nodes ?? [],
+            lineStart,
+          );
+          final aiSpans = TextSpan(
+            text: aiText,
+            style: defaultStyle?.copyWith(
+              color: Colors.grey[400],
+              fontStyle: FontStyle.italic
+            )
+          );
+          final afterSpans = _convert(
+            highlight.parse(afterAI, language: _langId).nodes ?? [],
+            lineStart + aiLineEnd,
+          );
+
+          lineSpans = [
+            ...beforeSpans,
+            aiSpans,
+            ...afterSpans,
+          ];
+        } else {
+          if (_cachedSpans[i] != null && _cachedSpans[i]!.isNotEmpty && !_inFlightEdits.containsKey(i)) {
+            lineSpans = _cachedSpans[i]!;
+          } else {
+            final nodes = highlight.parse(displayText, language: _langId).nodes ?? [];
+            lineSpans = _convert(nodes, lineStart);
+            if (!_inFlightEdits.containsKey(i)) _cachedSpans[i] = lineSpans;
+          }
+        }
+
+        final Set<int> unmatchedQuotes = _findUnmatchedQuotesInLine(displayText, lineStart);
+        final Set<int> allUnmatched = {...unmatchedBrackets, ...unmatchedQuotes};
+
+        lineSpans = _applyBracketHighlight(
+          lineSpans,
+          lineStart,
+          bracket1,
+          bracket2,
+          allUnmatched
+        );
+
+        lineSpans = _applyDiagnosticsStyling(lineSpans, i, lineStart);
+
+        if (!_inFlightEdits.containsKey(i) && selection.start < lineEnd && selection.end > lineStart) {
+          final selStart = selection.start.clamp(lineStart, lineEnd);
+          final selEnd = selection.end.clamp(lineStart, lineEnd);
+          lineSpans = _applySelectionToSpans(
+            lineSpans,
+            lineStart,
+            selStart,
+            selEnd,
+            selectedColor,
+          );
+        }
+
+        tp.text = TextSpan(
+          style: defaultStyle?.merge(
+            _foldRanges.any((fold) => fold.isFolded && fold.startIndex == i)
+              ? TextStyle(backgroundColor: _editorTheme['root']?.color?.withAlpha(50))
+              : null
+          ),
+          children: [
+            ...lineSpans,
+            if (_foldRanges.any((fold) => fold.isFolded && fold.startIndex == i))
+            TextSpan(text: ' ...', style: defaultStyle),
+          ]
+        );
+        final tpWidth = _lineWrap ? size.width - (_innerPadding?.horizontal ?? 0) : double.infinity;
+        tp.layout(maxWidth: tpWidth);
+        tp.paint(
+          canvas,
+          offset + Offset(
+            (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+              + _gutterWidth - (_lineWrap ? 0 : _hscrollController.offset)
+              ,
+            (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+              + contentTop
+              - _vscrollController.offset,
+          ),
+        );
+
+        spanOffset += lineLength + 1;
+      }
+      
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, _gutterWidth, viewBottom),
+        Paint()
+        ..style = PaintingStyle.fill
+        ..color = _gutterStyle.backgroundColor ??
+          _editorTheme['root']!.backgroundColor ??
+          Colors.transparent
+      );
+
+      if(_enableGutterDivider) {
+        canvas.drawRect(
+          Rect.fromLTWH(_gutterWidth, 0, 0.2, viewBottom),
+          Paint()
+            ..style = PaintingStyle.fill
+            ..color = _editorTheme['root']!.color!
+        );
+      }
+
+      for(int i=0; i<displayLines.length; i++){
+        if (
+          i >= _lineTops.length ||
+          i < firstVisibleLine ||
+          i > lastVisibleLine ||
+          _foldRanges.any(
+            (item)=> item.startIndex < i && item.endIndex >= i && item.isFolded
+          )
+        ) {
+          continue;
+        }
+
+        final contentTop = _lineTops[i];
+        gutterPainter.text = TextSpan(
+          text: (i + 1).toString(),
+          style: _gutterStyle.lineNumberStyle ?? defaultStyle
+        );
+
+        gutterPainter.textAlign = TextAlign.center;
+        gutterPainter.layout();
+        _gutterWidth = max(_gutterWidth, gutterPainter.width);
+
+        gutterPainter.paint(
+          canvas,
+          Offset(
+            offset.dx +  (_gutterWidth - gutterPainter.width) / 2,
+            offset.dy
+              + (_innerPadding?.vertical ?? 0)
+              + contentTop
+              - _vscrollController.offset
+          ),
+        );
+        
+        if(_foldRanges.isNotEmpty && _foldRanges.any((item)=> item.startIndex == i)){
+          final bool isInsideFoldedParent = _foldRanges.any(
+            (parent) => parent.isFolded && parent.startIndex < i && parent.endIndex >= i
+          );
+
+          if (!isInsideFoldedParent) {
+            final currentFolditem = _foldRanges.firstWhere((item) => item.startIndex == i);
+            final icon = currentFolditem.isFolded ? foldIcon : unfoldIcon;
+            foldIconPainter.text = TextSpan(
+              text: String.fromCharCode(icon.codePoint),
+              style: TextStyle(
+                color: (
+                  currentFolditem.isFolded ?
+                    _gutterStyle.foldedIconColor : _gutterStyle.unfoldedIconColor
+                ) ?? _editorTheme['root']?.color,
+                fontSize: (_textStyle?.fontSize ?? 15) + 2,
+                fontFamily: icon.fontFamily,
+                package: icon.fontPackage
+              )
+            );
+            
+            foldIconPainter.layout(maxWidth: _textStyle?.fontSize ?? 15);
+            foldIconPainter.paint(
+              canvas,
+              Offset(
+                _gutterWidth - foldIconPainter.width + (_innerPadding?.left ?? 0),
+                offset.dy + contentTop + (_innerPadding?.top ?? 0) - _vscrollController.offset + 1
+              )
+            );
+          }
+        }
+ 
+      }
+
+      canvas.save();
+      canvas.clipRect(Rect.fromLTWH(_gutterWidth, 0, size.width - _gutterWidth, size.height));
+
+      canvas.restore();
+
+      List<int> lineStarts = [];
+      int p = 0;
+      for (final l in displayLines) {
+        lineStarts.add(p);
+        p += l.length + 1;
+      }
+
+      List<_Pair> pairsToDraw = [];
+      for (final pr in _cachedBracketPairs) {
+        final openInfo = _indexToLineCol(pr.a, lineStarts, displayLines);
+        final closeInfo = _indexToLineCol(pr.b, lineStarts, displayLines);
+        final oLine = openInfo['line']!;
+        final cLine = closeInfo['line']!;
+        if (oLine != cLine && cLine >= firstVisibleLine && oLine <= lastVisibleLine) {
+          pairsToDraw.add(pr);
+        }
+      }
+
+      final double maxLinePainterWidth = _lineWrap ? size.width - (_innerPadding?.horizontal ?? 0) : double.infinity;
+
+      for (final pair in pairsToDraw) {
+        final open = _indexToLineCol(pair.a, lineStarts, displayLines);
+        final close = _indexToLineCol(pair.b, lineStarts, displayLines);
+        final int openLine = open['line']!;
+        final int closeLine = close['line']!;
+        if (openLine == closeLine) continue;
+
+        final bool isSelected = 
+          (bracket1 == pair.a && bracket2 == pair.b) ||
+          (bracket1 == pair.b && bracket2 == pair.a);
+
+        final Paint guidePaint = Paint()
+          ..color = isSelected
+              ? (_editorTheme['root']?.color ?? _textStyle?.color ?? Colors.grey)
+              : (_editorTheme['root']?.color ?? _textStyle?.color ?? Colors.grey).withAlpha(150)
+          ..strokeWidth = isSelected ? 0.7 : 0.3
+          ..style = PaintingStyle.stroke;
+
+        final String openLineText = displayLines[openLine];
+        final int openLeading = RegExp(r'^(\s*)').firstMatch(openLineText)?.group(0)?.length ?? 0;
+        List<InlineSpan> baseSpans;
+        if (_cachedSpans[openLine] != null && _cachedSpans[openLine]!.isNotEmpty) {
+          baseSpans = _cachedSpans[openLine]!;
+        } else {
+          final nodesForLine = highlight.parse(displayLines[openLine], language: _langId).nodes ?? [];
+          baseSpans = _convert(nodesForLine, lineStarts[openLine]);
+          _cachedSpans[openLine] = baseSpans;
+        }
+
+        final tpLine = _getLinePainter(openLine, baseSpans, maxLinePainterWidth, defaultStyle ?? TextStyle());
+
+        final dxLocal = tpLine.getOffsetForCaret(
+          TextPosition(offset: openLeading),
+          Rect.zero
+        ).dx;
+
+        final double guideX = offset.dx
+            + _gutterWidth
+            + (_innerPadding?.left ?? 0)
+            + dxLocal
+            - (_lineWrap ? 0 : _hscrollController.offset);
+
+        final double yTop = offset.dy
+          + (_innerPadding?.top ?? 0) 
+          + _lineTops[openLine + 1]
+          - _vscrollController.offset;
+        final double yBottom = offset.dy
+          + (_innerPadding?.top ?? 0)
+          + _lineTops[closeLine - 1]
+          + _lineHeights[closeLine]
+          - _vscrollController.offset;
+
+        if (guideX < _gutterWidth || guideX > size.width) continue;
+
+        final double fromY = yTop.clamp(0.0, viewBottom);
+        final double toY = yBottom.clamp(0.0, viewBottom);
+
+        if(_enableGuideLines) {
+          canvas.drawLine(
+            Offset(guideX, fromY), Offset(guideX, toY),
+            guidePaint
+          );
+        }
+      }
+
+      _drawIndentationGuidelines(
+        canvas,
+        offset,
+        displayLines,
+        firstVisibleLine,
+        lastVisibleLine,
+        maxLinePainterWidth
+      );
+    }
+  
+    if (_focusNode.hasFocus) {
+      final caretX = (_innerPadding?.left ?? 0)
+        + _gutterWidth
+        + _carretOffset.dx
+        - (_lineWrap ? 0 : _hscrollController.offset);
+      final caretY = (_innerPadding?.top ?? 0)
+        + _carretOffset.dy
+        - _vscrollController.offset;
+
+      if(_showCaret){
+        canvas.drawRect(
+          Rect.fromLTWH(
+            caretX,
+            caretY,
+            1.5,
+            _caretHeight
+          ),
+          _caretPainter,
+        );
+      }
+      
+      if(isMobile){
+        final Paint bubblePainter = Paint()
+        ..color = _selectionStyle.cursorBubbleColor
+        ..style = PaintingStyle.fill;
+
+        if(selection.end > selection.start){
+          final tpFull = TextPainter(
+            text: TextSpan(
+              text: _controller.text,
+              style: _textStyle,
+            ),
+            textDirection: TextDirection.ltr,
+          );
+          tpFull.layout();
+
+          final startCaret = tpFull.getOffsetForCaret(
+            TextPosition(offset: selection.start),
+            Rect.zero,
+          );
+          final endCaret = tpFull.getOffsetForCaret(
+            TextPosition(offset: selection.end),
+            Rect.zero,
+          );
+
+          final startCaretX = (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+            + startCaret.dx
+            + _gutterWidth
+            - (_lineWrap ? 0 : _hscrollController.offset);
+          final startCaretY = (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+            + startCaret.dy
+            - _vscrollController.offset;
+
+          final endCaretX = (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+            + endCaret.dx
+            + _gutterWidth
+            - (_lineWrap ? 0 : _hscrollController.offset);
+          final endCaretY = (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+            + endCaret.dy
+            - _vscrollController.offset;
+
+          canvas.drawRect(
+            Rect.fromLTWH(
+              startCaretX,
+              startCaretY,
+              1.5,
+              _caretHeight
+            ),
+            _caretPainter,
+          );
+          
+          _startHandleRect = Rect.fromLTWH(
+              startCaretX - _caretHeight,
+              startCaretY + _caretHeight,
+              _caretHeight,
+              _caretHeight,
+            );
+          
+          _endHandleRect = Rect.fromLTWH(
+              endCaretX,
+              endCaretY + _caretHeight,
+              _caretHeight,
+              _caretHeight,
+            );
+
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              _startHandleRect!,
+              topLeft: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25)
+            ),
+            bubblePainter,
+          );
+
+          canvas.drawRect(
+            Rect.fromLTWH(
+              endCaretX,
+              endCaretY,
+              1.5,
+              _caretHeight,
+            ),
+            _caretPainter,
+          );
+
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              _endHandleRect!,
+              topRight: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25)
+            ),
+            bubblePainter,
+          );
+
+          canvas.restore();
+        } else if(_showBubble) {
+          final handleSize = _caretHeight;
+          final handleCenterX = caretX;
+          final handleCenterY = caretY + _caretHeight;
+        
+          _normalHandle = Rect.fromLTWH(
+            handleCenterX,
+            handleCenterY,
+            handleSize,
+            handleSize,
+          );
+
+          canvas.save();
+          canvas.translate(handleCenterX, handleCenterY);
+          canvas.rotate(pi / 4);
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              Rect.fromCenter(center: Offset(_caretHeight / 2, _caretHeight / 2), width: handleSize, height: handleSize),
+              topRight: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25),
+            ),
+            bubblePainter,
+          );
+          canvas.restore();
+
+          if (_draggingCHandle) {
+            final caretLineIndex = _controller.selection.base.offset == -1
+                ? 0
+                : _controller.text.substring(0, _controller.selection.base.offset).split('\n').length - 1;
+            final lines = _controller.text.split('\n');
+            final lineText = (caretLineIndex >= 0 && caretLineIndex < lines.length)
+                ? lines[caretLineIndex]
+                : '';
+          
+            final caretInLine = _controller.selection.base.offset -
+                (caretLineIndex > 0 ? lines.take(caretLineIndex).map((l) => l.length + 1).reduce((a, b) => a + b) : 0);
+            final previewStart = caretInLine.clamp(0, lineText.length);
+            final previewEnd = (caretInLine + 10).clamp(0, lineText.length);
+            final previewText = lineText.substring(
+              max(0, previewStart - 10),
+              min(lineText.length, previewEnd),
+            );
+          
+            final zoomPainter = TextPainter(
+              text: TextSpan(
+                children: _convert(highlight.parse(
+                  previewText,
+                  language: _langId
+                ).nodes ?? []),
+                style: (_textStyle ?? _editorTheme['root'])?.copyWith(
+                  fontSize: (_textStyle?.fontSize ?? 14) * 1.5,
+                  backgroundColor: _editorTheme['root']?.backgroundColor ?? Colors.transparent
+                )
+              ),
+              textDirection: TextDirection.ltr,
+            );
+            zoomPainter.layout(maxWidth: size.width * 0.6);
+          
+            final zoomBoxWidth = zoomPainter.width + 16;
+            final zoomBoxHeight = zoomPainter.height + 12;
+            final zoomBoxX = caretX - zoomBoxWidth / 2;
+            final zoomBoxY = caretY - zoomBoxHeight - 18;
+          
+            final rrect = RRect.fromRectAndRadius(
+              Rect.fromLTWH(zoomBoxX, zoomBoxY, zoomBoxWidth, zoomBoxHeight),
+              Radius.circular(12),
+            );
+            
+            canvas.drawRRect(
+              rrect,
+              Paint()
+                ..color = _editorTheme['root']?.backgroundColor ?? Colors.transparent
+                ..style = PaintingStyle.fill
+            );
+
+            canvas.drawRRect(
+              rrect,
+              Paint()
+                ..color = _editorTheme['root']?.color ?? Colors.grey
+                ..style = PaintingStyle.stroke
+            );
+           
+            zoomPainter.paint(
+              canvas,
+              Offset(zoomBoxX + 8, zoomBoxY + 6),
+            );
+          }
+        }
+      }
+    }
+    canvas.restore();
+  }
+  
+  @override
+  void describeSemanticsConfiguration(SemanticsConfiguration config) {
+    super.describeSemanticsConfiguration(config);
+  }
+
+  void _ensureCaretVisible() {
+    final caretX = _carretOffset.dx + _gutterWidth + (_innerPadding?.horizontal ?? 0);
+    final caretY = _carretOffset.dy + (_innerPadding?.vertical ?? 0);
+    final vScrollOffset = _vscrollController.offset;
+    final hScrollOffset = _hscrollController.offset;
+    final viewportHeight = _vscrollController.position.viewportDimension;
+    final viewportWidth = _hscrollController.position.viewportDimension;
+
+    if (caretY > 0 && caretY <= vScrollOffset + (_innerPadding?.vertical ?? 0)) {
+      _vscrollController.animateTo(
+        caretY - (_innerPadding?.vertical ?? 0),
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    } else if (caretY + _caretHeight >= vScrollOffset + viewportHeight) {
+      _vscrollController.animateTo(
+        caretY + _caretHeight - viewportHeight + (_innerPadding?.vertical ?? 0),
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    }
+
+    if (caretX < hScrollOffset + (_innerPadding?.horizontal ?? 0) + _gutterWidth) {
+      _hscrollController.animateTo(
+        caretX - (_innerPadding?.horizontal ?? 0) - _gutterWidth,
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    } else if (caretX + 1.5 > hScrollOffset + viewportWidth) {
+      _hscrollController.animateTo(
+        caretX + 1.5 - viewportWidth + (_innerPadding?.horizontal ?? 0) + _gutterWidth,
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+  
+  @override
+  MouseCursor get cursor {
+    final localPosition = _currerntPosition;
+    if (localPosition.dx >= 0 && localPosition.dx < _gutterWidth) {
+      for(final fold in _foldRanges){
+        final iconRect = Rect.fromLTWH(
+          _gutterWidth - (_textStyle?.fontSize ?? 15) + (_innerPadding?.left ?? 0),
+          _lineTops[fold.startIndex] + (_innerPadding?.top ?? 0) - _vscrollController.offset,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+        );
+        if(iconRect.contains(_currerntPosition)){
+          return SystemMouseCursors.click;
+        }
+      }
+      return MouseCursor.defer;
+    }
+    return SystemMouseCursors.text;
+  }
+  
+  @override
+  PointerEnterEventListener? get onEnter => (event){};
+  
+  @override
+  PointerExitEventListener? get onExit => (event){};
+  
+  @override
+  bool get validForMouseTracker => true;
+}
+
+class _BackspaceNotifier extends ChangeNotifier {
+  int? _lineIndex;
+  String _lineText = '';
+  int? _caretInLine;
+  Offset? _caretOffset;
+
+  void setEdit({required int lineIndex, required String lineText, required int caretInLine, Offset? caretOffset}) {
+    _lineIndex = lineIndex;
+    _lineText = lineText;
+    _caretInLine = caretInLine;
+    _caretOffset = caretOffset;
+    
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(const Duration(milliseconds: 16), () {
+      notifyListeners();
+    });
+  }
+
+  void clear() {
+    _lineIndex = null;
+    _lineText = '';
+    _caretInLine = null;
+    _caretOffset = null;
+    _debounceTimer?.cancel();
+    notifyListeners();
+  }
+
+  Timer? _debounceTimer;
+
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    super.dispose();
+  }
+
+  int? get lineIndex => _lineIndex;
+  String get lineText => _lineText;
+  int? get caretInLine => _caretInLine;
+  Offset? get caretOffset => _caretOffset;
+}
+
+class _Pair { final int a, b; _Pair(this.a, this.b); }
+
+class FoldRange {
+  final int startIndex, endIndex;
+  bool isFolded = false;
+  List<FoldRange> originallyFoldedChildren = [];
+
+  FoldRange(this.startIndex, this.endIndex);
+  
+  void addOriginallyFoldedChild(FoldRange child) {
+    if (!originallyFoldedChildren.contains(child)) {
+      originallyFoldedChildren.add(child);
+    }
+  }
+  
+  void clearOriginallyFoldedChildren() {
+    originallyFoldedChildren.clear();
+  }
+  
+  bool containsLine(int line) {
+    return line > startIndex && line <= endIndex;
+  }
+}
+import 'dart:async';
+import 'dart:io';
+import 'dart:math';
+
+import 'code_content.dart';
+import 'scoll.dart';
+import 'controller.dart';
+import 'styling.dart';
+import '../LSP/lsp.dart';
+import '../AI_completion/ai.dart';
+
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:highlight/highlight.dart';
+import 'package:highlight/languages/python.dart';
+import 'package:flutter_highlight/themes/atom-one-dark.dart';
+import 'package:markdown_widget/config/configs.dart';
+import 'package:markdown_widget/widget/all.dart';
+
+part 'shortcuts.dart';
+
+//FIXME: Backspace issue in mobile
+//TODO: Dynamic height for hover bo
+//TODO: set undo stack start index to 1
+//TODO: Preserve text in a bugger
+
+class CodeForge extends StatefulWidget{
+  final CodeForgeController? controller;
+  final Map<String, TextStyle>? editorTheme;
+  final Mode? language;
+  final FocusNode? focusNode;
+  final TextStyle? textStyle;
+  final AiCompletion? aiCompletion;
+  final LspConfig? lspConfig;
+  final EdgeInsets? innerPadding;
+  final ScrollController? verticalScrollController;
+  final ScrollController? horizontalScrollController;
+  final UndoHistoryController? undoHistoryController;
+  final CodeSelectionStyle? selectionStyle;
+  final GutterStyle? gutterStyle;
+  final SuggestionStyle? suggestionStyle;
+  final HoverDetailsStyle? hoverDetailsStyle;
+  final String? filePath;
+  final String? initialText;
+  final bool readOnly;
+  final bool lineWrap;
+  final bool autoFocus;
+  final bool enableFolding;
+  final bool enableGuideLines;
+  final bool enableSuggestions;
+  final bool enableGutterDivider;
+
+  const CodeForge({
+    super.key,
+    this.controller,
+    this.editorTheme,
+    this.language,
+    this.aiCompletion,
+    this.lspConfig,
+    this.filePath,
+    this.initialText,
+    this.focusNode,
+    this.verticalScrollController,
+    this.horizontalScrollController,
+    this.undoHistoryController,
+    this.textStyle,
+    this.innerPadding,
+    this.readOnly = false,
+    this.autoFocus = false,
+    this.lineWrap = false,
+    this.enableFolding = true,
+    this.enableGuideLines = true,
+    this.enableSuggestions = true,
+    this.enableGutterDivider = false,
+    this.selectionStyle,
+    this.gutterStyle,
+    this.suggestionStyle,
+    this.hoverDetailsStyle
+  });
+
+  @override
+  State<CodeForge> createState() => _CodeForgeState();
+}
+
+class _CodeForgeState extends State<CodeForge> {
+  late final ScrollController _vscrollController, _hscrollController;
+  late final CodeForgeController _controller;
+  late final UndoHistoryController _undoController;
+  late final FocusNode _focusNode;
+  late final Map<String, TextStyle> _editorTheme;
+  late final ValueNotifier<CodeContent> _contentNotifier;
+  late final ValueNotifier<bool> _selectionNotifier;
+  late final ValueNotifier<Offset> _offsetNotifier;
+  late final CodeContent _content;
+  late final Mode _language;
+  late final CodeSelectionStyle _selectionStyle;
+  late final GutterStyle _gutterStyle;
+  late final SuggestionStyle _suggestionStyle;
+  late final HoverDetailsStyle _hoverDetailsStyle;
+  final _isMobile = Platform.isAndroid || Platform.isIOS;
+  final _suggScrollController = ScrollController();
+  final _backspaceNotifier = _BackspaceNotifier();
+  final Map<int, String> _heldLineEdits = {}, _originalLineStates = {};
+  final Map<String, String> _cachedResponse = {};
+  final ValueNotifier<String?> _aiNotifier = ValueNotifier(null);
+  final ValueNotifier<Offset?> _aiOffsetNotifier = ValueNotifier(null);
+  final ValueNotifier<List<dynamic>?> _suggestionNotifier = ValueNotifier(null);
+  final ValueNotifier<List<dynamic>?> _hoverNotifier = ValueNotifier(null);
+  final ValueNotifier<List<LspErrors>> _diagnosticsNotifier = ValueNotifier([]);
+  final ValueNotifier<bool> _isHoveringPopup = ValueNotifier(false);
+  List<dynamic> _suggestions = [];
+  TextInputConnection? _connection;
+  int? _holdLocalLine, _holdLocalCaretInLine;
+  int _sugSelIndex = 0;
+  String? _holdLocalLineText;
+  Timer? _keypressTimer, _aiDebounceTimer;
+  bool _isHovered = false, _backspaceHeld = false, _isTyping = false;
+  bool _deleteHeld = false;
+  bool _lspReady = false;
+  TextEditingValue? _previousValue;
+
+  @override
+  void initState() {
+    _controller = widget.controller ?? CodeForgeController();
+    _vscrollController = widget.verticalScrollController ?? ScrollController();
+    _hscrollController = widget.horizontalScrollController ?? ScrollController();
+    _undoController = widget.undoHistoryController ?? UndoHistoryController();
+    _editorTheme = widget.editorTheme ?? atomOneDarkTheme;
+    _selectionStyle = widget.selectionStyle ?? CodeSelectionStyle();
+    _gutterStyle = widget.gutterStyle ?? GutterStyle(
+      lineNumberStyle: widget.textStyle ?? _editorTheme['root'],
+      foldedIconColor: _editorTheme['root']?.color,
+      unfoldedIconColor: _editorTheme['root']?.color,
+      backgroundColor: _editorTheme['root']?.backgroundColor
+    );
+    _suggestionStyle = widget.suggestionStyle ?? SuggestionStyle(
+      elevation: 6,
+      textStyle: ((){
+        TextStyle style = widget.textStyle ?? _editorTheme['root']!;
+        if(style.color == null){
+          style = style.copyWith(
+            color: _editorTheme['root']!.color
+          ); 
+        } 
+        return style;
+      })(),
+      backgroundColor: _editorTheme['root']!.backgroundColor!,
+      focusColor: Colors.blueAccent.withAlpha(50),
+      hoverColor: Colors.grey.withAlpha(15),
+      splashColor: Colors.blueAccent.withAlpha(50),
+      shape: BeveledRectangleBorder(
+        side: BorderSide(
+          color: _editorTheme['root']!.color ?? Colors.grey[400]!,
+          width: 0.2,
+        ),
+      ),
+    );
+
+    _hoverDetailsStyle = widget.hoverDetailsStyle ?? HoverDetailsStyle(
+      shape: BeveledRectangleBorder(
+        side: BorderSide(
+          color: _editorTheme['root']!.color ?? Colors.grey[400]!,
+          width: 0.2,
+        ),
+      ),
+      backgroundColor: _editorTheme['root']!.backgroundColor!,
+      focusColor: Colors.blueAccent.withAlpha(50),
+      hoverColor: Colors.grey.withAlpha(15),
+      splashColor: Colors.blueAccent.withAlpha(50),
+      textStyle: ((){
+        TextStyle style = widget.textStyle ?? _editorTheme['root']!;
+        if(style.color == null){
+          style = style.copyWith(
+            color: _editorTheme['root']!.color
+          ); 
+        } 
+        return style;
+      })(),
+    );
+
+    _language = widget.language ?? python;
+    _focusNode = widget.focusNode ?? FocusNode();
+    _connection = _controller.connection;
+    _content = CodeContent(controller: _controller);
+    _contentNotifier = ValueNotifier(_content);
+    _selectionNotifier = ValueNotifier(false);
+    _offsetNotifier = ValueNotifier(Offset(-1, -1));
+    _controller.manualAiCompletion = getManualAiSuggestion;
+    _controller.readOnly = widget.readOnly;
+
+    if(widget.autoFocus) _focusNode.requestFocus();
+
+    if(widget.lspConfig != null){
+       if(widget.initialText != null){
+        throw ArgumentError(
+          'Cannot provide both filePath and initialText to CodeForge.'
+        );
+      }
+      _controller.text = File(widget.filePath!).readAsStringSync();
+
+      if ((widget.lspConfig!.filePath != widget.filePath) || widget.filePath == null) {
+        throw Exception(
+          'File path in LspConfig does not match the provided filePath in CodeCrafter.',
+        );
+      }
+      
+      (() async {
+        try {
+          if (widget.lspConfig is LspSocketConfig) {
+            await (widget.lspConfig as LspSocketConfig).connect();
+          }
+          await widget.lspConfig!.initialize();
+          await Future.delayed(const Duration(milliseconds: 300));
+          await widget.lspConfig!.openDocument();
+          setState(() {
+            _lspReady = true;
+          });
+        } catch (e) {
+          debugPrint('Error initializing LSP: e');
+        }
+      })();
+
+      widget.lspConfig!.responses.listen((data){
+        if (data['method'] == 'textDocument/publishDiagnostics') {
+          final diagnostics = data['params']['diagnostics'] as List;
+          _diagnosticsNotifier.value.clear();
+          if (diagnostics.isNotEmpty) {
+            final List<LspErrors> errors = [];
+            for (final (item as Map<String, dynamic>) in diagnostics) {
+              errors.add(
+                LspErrors(
+                  severity: (() {
+                    if (item['severity'] == 1 &&
+                        widget.lspConfig!.disableError) {
+                      return 0;
+                    }
+                    if (item['severity'] == 2 &&
+                        widget.lspConfig!.disableWarning) {
+                      return 0;
+                    }
+                    return item['severity'];
+                  })(),
+                  range: item['range'],
+                  message: item['message'],
+                ),
+              );
+            }
+            _diagnosticsNotifier.value = List.from(errors);
+          }
+        }
+      });
+    } else if(widget.initialText != null){
+      _controller.text = widget.initialText!;
+    }
+
+    _focusNode.addListener((){
+      if((_connection == null || !_connection!.attached) && !widget.readOnly){
+        _connection = TextInput.attach(
+          _controller,
+          TextInputConfiguration(
+            readOnly: widget.readOnly,
+            enableDeltaModel: !widget.readOnly,
+            inputType: TextInputType.multiline,
+            inputAction: TextInputAction.newline,
+            autocorrect: false
+        ));
+        _connection!.setEditingState(_controller.value);
+        _connection!.show();
+      }
+      _controller.refresh();
+    });
+
+    _controller.addListener((){
+      final text = _controller.text;
+      final lines = text.split('\n');
+      final line = lines.length - 1;
+      final cursorPosition = _controller.selection.extentOffset;
+      final prefix = _getCurrentWordPrefix(text, cursorPosition);
+      final character = lines.isNotEmpty ? lines.last.length : 0;
+      final currentValue = _controller.value;
+      final prevValue = _previousValue ?? currentValue;
+      _isTyping = false;
+
+      if(
+        currentValue.selection.extentOffset != prevValue.selection.extentOffset &&
+        currentValue.text == prevValue.text
+      ){
+        _suggestionNotifier.value = null;
+      } else if(_isMobile) {
+        _hoverNotifier.value = null;
+      }
+
+      
+
+      if(
+        widget.lspConfig != null && _lspReady &&
+        currentValue.text != prevValue.text
+      ){
+        (() async => await widget.lspConfig!.updateDocument(text))();
+      }
+
+      _contentNotifier.value = CodeContent(
+        controller: _controller,
+        textStyle: widget.textStyle
+      );
+      _aiDebounceTimer?.cancel();
+      
+      if(
+        widget.aiCompletion != null &&
+        _controller.selection.isValid &&
+        widget.aiCompletion!.enableCompletion
+      ){
+        
+        final text = _controller.text;
+        final cursorPosition = _controller.selection.extentOffset.clamp(0, text.length);
+        final textAfterCursor = text.substring(cursorPosition);        
+        if(cursorPosition <= 0) return;
+        bool lineEnd = textAfterCursor.isEmpty ||
+              textAfterCursor.startsWith('\n') ||
+              textAfterCursor.trim().isEmpty;
+        if(!lineEnd) return;
+        final codeToSend = "{text.substring(0, cursorPosition)}<|CURSOR|>{text.substring(cursorPosition)}";
+        if(
+          widget.aiCompletion!.completionType == CompletionType.auto ||
+          widget.aiCompletion!.completionType == CompletionType.mixed
+        ){
+          _aiDebounceTimer = Timer(
+            Duration(milliseconds: widget.aiCompletion!.debounceTime),
+            () async{
+              _aiNotifier.value = await _getCachedResponse(codeToSend);
+            }
+          );
+        }
+      }
+
+      if (currentValue.text.length == prevValue.text.length + 1 &&
+          currentValue.selection.baseOffset == prevValue.selection.baseOffset + 1
+        ) {
+        final insertedChar = currentValue.text.substring(
+          prevValue.selection.baseOffset,
+          currentValue.selection.baseOffset,
+        );
+        _isTyping =
+            insertedChar.isNotEmpty &&
+            RegExp(r'[a-zA-Z]').hasMatch(insertedChar);
+        if(
+          widget.enableSuggestions &&
+          _isTyping &&
+          prefix.isNotEmpty &&
+          _controller.selection.extentOffset > 0
+        ){
+          if(widget.lspConfig == null){
+            final regExp = RegExp(r'\b\w+\b');
+            final List<String> words = regExp
+              .allMatches(text)
+              .map((m) => m.group(0)!)
+              .toList();
+            String currentWord = '';
+            if(text.isNotEmpty){
+              final match = RegExp(r'\w+').firstMatch(text);
+              if (match != null) {
+                currentWord = match.group(0)!;
+              }
+            }
+            _suggestions.clear();
+            for(final i in words){
+              if(!_suggestions.contains(i) && i != currentWord) {
+                _suggestions.add(i);
+              }
+            }
+            if(prefix.isNotEmpty){
+              _suggestions = _suggestions
+                .where((s) => s.startsWith(prefix))
+                .toList();
+            }
+          } else if(_lspReady){
+              final lspConfig = widget.lspConfig!;
+              (() async{
+                final suggestion = await lspConfig.getCompletions(
+                  line,
+                  character
+                ); 
+                _suggestions = suggestion;
+              })();
+          }
+          _sortSuggestions(prefix);
+          final triggerChar = text[cursorPosition - 1];
+          if (!RegExp(r'[a-zA-Z]').hasMatch(triggerChar)) {
+              _suggestionNotifier.value = null;
+              return;
+          }
+          if (mounted && _suggestions.isNotEmpty) {
+            _sugSelIndex = 0;
+            _suggestionNotifier.value = _suggestions;
+          }
+        } else {
+          _suggestionNotifier.value = null; 
+        }
+      }
+      _previousValue = currentValue;
+
+    });
+    
+    WidgetsBinding.instance.addPostFrameCallback((_){
+      if(_vscrollController.hasClients) _vscrollController.jumpTo(0);
+      if(_hscrollController.hasClients) _hscrollController.jumpTo(0);
+      _controller.refresh();
+    });
+    super.initState();
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    _connection?.close();
+    _controller.dispose();
+    _contentNotifier.dispose();
+    _hscrollController.dispose();
+    _vscrollController.dispose();
+    super.dispose();
+  }
+
+  Map<String,int> _lineInfoAtGlobalOffset(int globalOffset) {
+    final lines = _controller.text.split('\n');
+    int accum = 0;
+    for (int i = 0; i < lines.length; i++) {
+      final lineLen = lines[i].length;
+      if (globalOffset >= accum && globalOffset <= accum + lineLen) {
+        return {'line': i, 'lineStart': accum, 'inLine': globalOffset - accum};
+      }
+      accum += lineLen + 1;
+    }
+    final last = max(0, lines.length - 1);
+    final lastStart = accum - (lines.isNotEmpty ? (lines.last.length + 1) : 0);
+    return {'line': last, 'lineStart': lastStart, 'inLine': lines.isNotEmpty ? lines.last.length : 0};
+  }
+  
+  void _commitHeldDeleteToController() {
+    if (!_deleteHeld) return;
+    if (_holdLocalLineText != null && _holdLocalLine != null) {
+      final currentText = _controller.text;
+      final lines = currentText.split('\n');
+      
+      if (_holdLocalLine! < lines.length) {
+        lines[_holdLocalLine!] = _holdLocalLineText!;
+        final newText = lines.join('\n');
+        final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + (_holdLocalCaretInLine ?? 0);
+        
+        _controller.value = _controller.value.copyWith(
+          text: newText,
+          selection: TextSelection.collapsed(offset: newCaret),
+        );
+      }
+    }
+    
+    _backspaceNotifier.clear();
+    _resetDeleteState();
+    _commonF(_controller);
+  }
+  
+  void _resetDeleteState() {
+    _holdLocalLine = null;
+    _holdLocalCaretInLine = null;
+    _holdLocalLineText = null;
+    _deleteHeld = false;
+    _heldLineEdits.clear();
+    _originalLineStates.clear();
+  }
+  
+  void _syncAndMoveToNextLine() {
+    final currentText = _controller.text;
+    final lines = currentText.split('\n');
+    
+    if (_holdLocalLine != null &&
+        _holdLocalLine! < lines.length - 1) {
+      final nextLineIndex = _holdLocalLine! + 1;
+      final currentLineText = _holdLocalLineText ?? lines[_holdLocalLine!];
+      final nextLineText = lines[nextLineIndex];
+  
+      final merged = currentLineText + nextLineText;
+      lines[_holdLocalLine!] = merged;
+      lines.removeAt(nextLineIndex);
+  
+      final newText = lines.join('\n');
+      final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + currentLineText.length;
+  
+      _controller.value = _controller.value.copyWith(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newCaret),
+      );
+  
+      _holdLocalLineText = merged;
+      _holdLocalCaretInLine = currentLineText.length;
+  
+      _backspaceNotifier.clear();
+      _controller.refresh();
+    }
+  }
+  
+  void _commitHeldBackspaceToController() {
+    if (!_backspaceHeld) return;
+    if (_holdLocalLineText != null && _holdLocalLine != null) {
+      final currentText = _controller.text;
+      final lines = currentText.split('\n');
+      
+      if (_holdLocalLine! < lines.length) {
+        lines[_holdLocalLine!] = _holdLocalLineText!;
+        final newText = lines.join('\n');
+        final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + (_holdLocalCaretInLine ?? 0);
+        
+        _controller.value = _controller.value.copyWith(
+          text: newText,
+          selection: TextSelection.collapsed(offset: newCaret),
+        );
+      }
+    }
+    
+    _backspaceNotifier.clear();
+    _resetBackspaceState();
+    _commonF(_controller);
+  }
+
+  void _resetBackspaceState() {
+    _holdLocalLine = null;
+    _holdLocalCaretInLine = null;
+    _holdLocalLineText = null;
+    _backspaceHeld = false;
+    _deleteHeld = false;
+    _heldLineEdits.clear();
+    _originalLineStates.clear();
+  }
+
+  void _syncAndMoveToPreviousLine() {
+    final currentText = _controller.text;
+    final lines = currentText.split('\n');
+    if (_holdLocalLine != null &&
+        _holdLocalLine! > 0 &&
+        _holdLocalLine! < lines.length) {
+      final prevLineIndex = _holdLocalLine! - 1;
+      final currentLineText = _holdLocalLineText ?? lines[_holdLocalLine!];
+
+      final merged = lines[prevLineIndex] + currentLineText;
+      lines[prevLineIndex] = merged;
+      lines.removeAt(_holdLocalLine!);
+
+      final newText = lines.join('\n');
+      final newCaret = _lineStartGlobalOffset(prevLineIndex) + merged.length;
+
+      _controller.value = _controller.value.copyWith(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newCaret),
+      );
+
+      _holdLocalLine = prevLineIndex;
+      _holdLocalLineText = merged;
+      _holdLocalCaretInLine = merged.length;
+
+      _backspaceNotifier.clear();
+      _controller.refresh();
+    }
+  }
+
+  int _lineStartGlobalOffset(int lineIndex) {
+    final lines = _controller.text.split('\n');
+    int acc = 0;
+    for (int i = 0; i < lineIndex && i < lines.length; i++) {
+      acc += lines[i].length + 1;
+    }
+    return acc;
+  }
+
+  Future<String> _getCachedResponse(String codeToSend) async {
+    final String key = codeToSend.hashCode.toString();
+    if (_cachedResponse.containsKey(key)) {
+      return _cachedResponse[key]!;
+    }
+    final String aiResponse = await widget.aiCompletion!.model.completionResponse(codeToSend);
+    _cachedResponse[key] = aiResponse;
+    return aiResponse;
+  }
+
+  void _sortSuggestions(String prefix) {
+    _suggestions.sort((a, b) {
+      final aStartsWith = a is LspCompletion
+          ? a.label.toLowerCase().startsWith(prefix.toLowerCase())
+          : a.toLowerCase().startsWith(prefix.toLowerCase());
+      final bStartsWith = b is LspCompletion
+          ? b.label.toLowerCase().startsWith(prefix.toLowerCase())
+          : b.toLowerCase().startsWith(prefix.toLowerCase());
+      if (aStartsWith && !bStartsWith) return -1;
+      if (!aStartsWith && bStartsWith) return 1;
+
+      return a is LspCompletion ? b.label.compareTo(a.label) : b.compareTo(a);
+    });
+  }
+
+  Future<void> getManualAiSuggestion() async {
+    if (widget.aiCompletion?.completionType == CompletionType.manual ||
+        widget.aiCompletion?.completionType == CompletionType.mixed) {
+      final String text = _controller.text;
+      final int cursorPosition = _controller.selection.extentOffset;
+      final String codeToSend = "{text.substring(0, cursorPosition)}<|CURSOR|>{text.substring(cursorPosition)}";
+      _aiNotifier.value = await _getCachedResponse(codeToSend);
+    }
+  }
+
+  String _getCurrentWordPrefix(String text, int offset) {
+    final safeOffset = offset.clamp(0, text.length);
+    final beforeCursor = text.substring(0, safeOffset);
+    final match = RegExp(r'([a-zA-Z_][a-zA-Z0-9_]*)').firstMatch(beforeCursor);
+    return match?.group(0) ?? '';
+  }
+
+void _scrollSuggestionToIndex(int index) {
+  final itemHeight = (widget.textStyle?.fontSize ?? 14) + 6.5;
+  final scrollOffset = _suggScrollController.offset;
+  final viewHeight = 390.0;
+
+  final itemTop = index * itemHeight;
+  final itemBottom = itemTop + itemHeight;
+
+  if (itemTop < scrollOffset) {
+    _suggScrollController.animateTo(
+      itemTop,
+      duration: Duration(milliseconds: 120),
+      curve: Curves.easeInOut,
+    );
+  } else if (itemBottom > scrollOffset + viewHeight) {
+    _suggScrollController.animateTo(
+      itemBottom - viewHeight,
+      duration: Duration(milliseconds: 120),
+      curve: Curves.easeInOut,
+    );
+  }
+}
+
+  @override
+  Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final screenHeight = MediaQuery.of(context).size.height;
+    return LayoutBuilder(
+      builder: (_, constraints) {
+        return GestureDetector(
+          onTap: _focusNode.requestFocus,
+          child: CallbackShortcuts(
+            bindings: _getShortcuts(_controller, widget.readOnly),
+            child: Stack(
+              children: [
+                RawScrollbar(
+                  thumbColor: _editorTheme['root']!.color!.withAlpha(110),
+                  radius: Radius.circular(20),
+                  controller: _vscrollController,
+                  interactive: !_isMobile,
+                  thumbVisibility: _isHovered,
+                  child: RawScrollbar(
+                    thumbColor: _editorTheme['root']!.color!.withAlpha(110),
+                    radius: Radius.circular(20),
+                    controller: _hscrollController,
+                    thumbVisibility: _isHovered,
+                    interactive: !_isMobile,
+                    child: MouseRegion(
+                      onEnter: (event) => setState(() => _isHovered = true),
+                      onExit: (event) => setState(() => _isHovered = false),
+                      child: UndoHistory<TextEditingValue>(
+                        value: _controller,
+                        controller: _undoController,
+                        focusNode: _focusNode,
+                          onTriggered:(value) {
+                            _controller.value = value;
+                            _controller.refresh();
+                          },
+                        shouldChangeUndoStack: (oldValue, newValue) {
+                          if (!newValue.selection.isValid) {
+                            return false;
+                          }
+
+                          if (oldValue == null && 
+                              newValue.text.isEmpty && 
+                              newValue.selection.extentOffset <= 0) {
+                            return false;
+                          }
+                          
+                          if (oldValue != null && oldValue.text == newValue.text) {
+                            return false;
+                          }
+                
+                          return oldValue == null ||
+                            oldValue.text != newValue.text ||
+                            oldValue.composing != newValue.composing;
+                        },
+                        child: ValueListenableBuilder(
+                          valueListenable: _selectionNotifier,
+                          builder: (_, selectionValue, child) {
+                            return TwoDimensionalScrollable(
+                              verticalDetails: ScrollableDetails.vertical(
+                                controller: _vscrollController,
+                                physics: selectionValue ? NeverScrollableScrollPhysics() : ClampingScrollPhysics()
+                              ),
+                              horizontalDetails: ScrollableDetails.horizontal(
+                                controller: _hscrollController,
+                                physics: selectionValue ? NeverScrollableScrollPhysics() : ClampingScrollPhysics()
+                              ),
+                              viewportBuilder: (_, voffset, hoffset) {
+                                return CustomViewport(
+                                  verticalOffset: voffset,
+                                  horizontalOffset: hoffset,
+                                  mainAxis: Axis.vertical,
+                                  verticalAxisDirection: AxisDirection.down,
+                                  horizontalAxisDirection: AxisDirection.right,
+                                  delegate: TwoDimensionalChildBuilderDelegate(
+                                    maxXIndex: 0,
+                                    maxYIndex: 0,
+                                    builder: (_, vicinity){
+                                      return ValueListenableBuilder(
+                                        valueListenable: _contentNotifier,
+                                        builder: (_, value, child) {
+                                          final codeField = _CodeField(
+                                              context,
+                                              _editorTheme,
+                                              _language,
+                                              _controller,
+                                              _focusNode,
+                                              widget.textStyle,
+                                              widget.innerPadding,
+                                              _vscrollController,
+                                              _hscrollController,
+                                              widget.lineWrap,
+                                              widget.enableFolding,
+                                              widget.readOnly,
+                                              widget.enableGuideLines,
+                                              value,
+                                              _selectionStyle,
+                                              _gutterStyle,
+                                              _selectionNotifier,
+                                              _aiNotifier,
+                                              _aiOffsetNotifier,
+                                              _offsetNotifier,
+                                              _hoverNotifier,
+                                              _diagnosticsNotifier,
+                                              _isHoveringPopup,
+                                              _backspaceNotifier,
+                                              widget.enableGutterDivider
+                                            );
+                                          return SizedBox(
+                                            height: value.totalHeight + (widget.innerPadding?.vertical ?? 0),
+                                            width: widget.lineWrap 
+                                              ? constraints.maxWidth
+                                              : max(
+                                                  value.totalWidth + (widget.innerPadding?.horizontal ?? 0),
+                                                  constraints.maxWidth
+                                                ),
+                                            child:
+                                            KeyboardListener(
+                                              focusNode: _focusNode,
+                                              onKeyEvent: (event) {
+                                                final isShiftPressed = HardwareKeyboard.instance.isShiftPressed;
+                                                final isCtrlPressed = HardwareKeyboard.instance.isControlPressed;
+                                                if(isCtrlPressed) return;
+
+                                                if (event is KeyUpEvent) {
+                                                  if(event.logicalKey == LogicalKeyboardKey.backspace){
+                                                    _commitHeldBackspaceToController();
+                                                  } else if(event.logicalKey == LogicalKeyboardKey.delete){
+                                                    _commitHeldDeleteToController();
+                                                  }
+                                                  return;
+                                                }
+                                                
+                                                if(event is KeyDownEvent){
+                                                  if(event.logicalKey == LogicalKeyboardKey.escape){
+                                                    _suggestionNotifier.value = null;
+                                                    _aiOffsetNotifier.value = null;
+                                                    _offsetNotifier.value = Offset(-1, -1);
+                                                  }
+                                                  
+                                                  if(
+                                                    event.logicalKey == LogicalKeyboardKey.enter &&
+                                                    _controller.isShowingSuggestions &&
+                                                    !_isMobile
+                                                  ){
+                                                    final suggestion = _suggestionNotifier.value?[_sugSelIndex];
+                                                    if(suggestion != null){
+                                                      if(suggestion is String){
+                                                      _controller.insertAtCurrentCursor(suggestion, replaceTypedChar: true);
+                                                      } else if(suggestion is LspCompletion){
+                                                        _controller.insertAtCurrentCursor(suggestion.label, replaceTypedChar: true);
+                                                      }
+                                                    }
+                                                    _suggestionNotifier.value = null;  
+                                                  }
+                                                  
+                                                }
+
+                                                if(event is KeyDownEvent || event is KeyRepeatEvent){
+                                                  final currentSelection = _controller.selection;
+                                                  final currentText = _controller.text;
+                                                  switch (event.logicalKey) {
+                                                    case LogicalKeyboardKey.delete: 
+                                                      if(widget.readOnly) return;
+                                                      _suggestionNotifier.value = null;
+                                                      if(!currentSelection.isValid) return;
+                                                      if(
+                                                        (event is KeyDownEvent && 
+                                                        !currentSelection.isCollapsed) ||
+                                                        (currentText.substring(
+                                                          currentSelection.extentOffset,
+                                                          (currentSelection.extentOffset + 1).clamp(0, currentText.length))
+                                                        ) == '\n'
+                                                      ) {
+                                                        _controller.delete();
+                                                        return;
+                                                      }
+
+                                                      if (!_deleteHeld) {
+                                                        final info = _lineInfoAtGlobalOffset(currentSelection.extentOffset);
+                                                        _holdLocalLine = info['line'];
+                                                        _holdLocalCaretInLine = info['inLine'];
+                                                        final lines = currentText.split('\n');
+                                                        _holdLocalLineText = (0 <= _holdLocalLine! && _holdLocalLine! < lines.length) 
+                                                            ? lines[_holdLocalLine!] 
+                                                            : '';
+                                                        _deleteHeld = true;
+                                                        _heldLineEdits.clear();
+                                                      }
+
+                                                      if (_holdLocalLineText != null) {
+                                                        final caretIn = _holdLocalCaretInLine ?? 0;
+                                                        final lineText = _holdLocalLineText!;
+
+                                                        if (caretIn < lineText.length) {
+                                                          final before = lineText.substring(0, caretIn);
+                                                          final after = lineText.substring(caretIn + 1);
+                                                          _holdLocalLineText = before + after;
+                                                          
+                                                          Offset carretOffset = _content.caretOffset;
+                                                          final tempPainter = TextPainter(
+                                                            text: TextSpan(
+                                                              text: before,
+                                                              style: widget.textStyle ?? _editorTheme['root']
+                                                            ),
+                                                            textDirection: TextDirection.ltr
+                                                          );
+                                                          tempPainter.layout();
+                                                          carretOffset = Offset(tempPainter.width, carretOffset.dy);
+
+                                                          _backspaceNotifier.setEdit(
+                                                            lineIndex: _holdLocalLine!,
+                                                            lineText: _holdLocalLineText!,
+                                                            caretInLine: _holdLocalCaretInLine!,
+                                                            caretOffset: carretOffset
+                                                          );
+                                                        } else if (caretIn >= lineText.length) {
+                                                          final lines = _holdLocalLineText != null
+                                                            ? _holdLocalLineText!.split('\n')
+                                                            : [];
+                                                          if (_holdLocalLine != null && _holdLocalLine! < lines.length - 1) {
+                                                            _syncAndMoveToNextLine();
+                                                          }
+                                                        }
+                                                      }
+                                                      break;
+
+                                                    case LogicalKeyboardKey.backspace:
+                                                      if(widget.readOnly) return;
+                                                      _suggestionNotifier.value = null;
+                                                      if (!currentSelection.isValid) return;
+                                                      if(
+                                                        event is KeyDownEvent &&
+                                                        !currentSelection.isCollapsed
+                                                      ){
+                                                        _controller.backspace();
+                                                        _commonF(_controller);
+                                                        return;
+                                                      }
+                                                      if (!_backspaceHeld) {
+                                                        final info = _lineInfoAtGlobalOffset(currentSelection.extentOffset);
+                                                        _holdLocalLine = info['line'];
+                                                        _holdLocalCaretInLine = info['inLine'];
+                                                        final lines = currentText.split('\n');
+                                                        _holdLocalLineText = (0 <= _holdLocalLine! && _holdLocalLine! < lines.length) 
+                                                            ? lines[_holdLocalLine!] 
+                                                            : '';
+                                                        _backspaceHeld = true;
+                                                        _heldLineEdits.clear();
+                                                      }
+                        
+                                                      if (_holdLocalLineText != null) {
+                                                        final caretIn = _holdLocalCaretInLine ?? 0;
+                        
+                                                        if (caretIn > 0 && caretIn <= _holdLocalLineText!.length) {
+                                                          final before = _holdLocalLineText!.substring(0, caretIn - 1);
+                                                          final after = _holdLocalLineText!.substring(caretIn);
+                                                          _holdLocalLineText = before + after;
+                                                          _holdLocalCaretInLine = caretIn - 1;
+                                                          
+                                                          Offset carretOffset = _content.caretOffset;
+                                                          final tempPainter = TextPainter(
+                                                            text: TextSpan(
+                                                              text: before,
+                                                              style: widget.textStyle ?? _editorTheme['root']
+                                                            ),
+                                                            textDirection: TextDirection.ltr
+                                                          );
+                                                          tempPainter.layout();
+                                                          carretOffset = Offset(tempPainter.width, carretOffset.dy);
+                        
+                                                          _backspaceNotifier.setEdit(
+                                                            lineIndex: _holdLocalLine!,
+                                                            lineText: _holdLocalLineText!,
+                                                            caretInLine: _holdLocalCaretInLine!,
+                                                            caretOffset: carretOffset
+                                                          );
+                                                        } else if (caretIn == 0 && _holdLocalLine! > 0) {
+                                                          _syncAndMoveToPreviousLine();
+                                                        }
+                                                      }
+                                                      break;
+                                                    case LogicalKeyboardKey.arrowUp:
+                                                      if(isShiftPressed) break;
+                                                      if(_suggestionNotifier.value != null){
+                                                        setState(() {
+                                                          _sugSelIndex = (_sugSelIndex - 1) % (_suggestionNotifier.value?.length ?? 1);
+                                                          _scrollSuggestionToIndex(_sugSelIndex);
+                                                        });
+                                                        return;
+                                                      }
+                                                      final textBeforeCursor = currentText.substring(0, currentSelection.extentOffset);
+                                                      final lines = textBeforeCursor.split('\n');
+                                                      if (lines.length > 1) {
+                                                        final currentLineStart = currentSelection.extentOffset - lines.last.length;
+                                                        final previousLineText = lines[lines.length - 2];
+                                                        final newOffset = currentLineStart - previousLineText.length - 1;
+                                                        
+                                                        final targetPosition = min(currentSelection.extentOffset - currentLineStart, previousLineText.length);
+                                                        final newCursorPosition = newOffset + targetPosition;
+                                                        
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: newCursorPosition)
+                                                        );
+                                                      } else if (currentSelection.extentOffset > 0) {
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: 0)
+                                                        );
+                                                      }
+                                                      break;
+                                    
+                                                    case LogicalKeyboardKey.arrowDown:
+                                                      if(isShiftPressed) break;
+                                                      if(_suggestionNotifier.value != null){
+                                                        setState(() {
+                                                          _sugSelIndex = (_sugSelIndex + 1) % (_suggestionNotifier.value?.length ?? 1);
+                                                          _scrollSuggestionToIndex(_sugSelIndex);
+                                                        });
+                                                        return;
+                                                      }
+                                                      final lines = currentText.split('\n');
+                                                      int caret = currentSelection.extentOffset;
+                                                      int charCount = 0;
+                                                      int currentLine = 0;
+                                                      for (int i = 0; i < lines.length; i++) {
+                                                        if (caret <= charCount + lines[i].length) {
+                                                          currentLine = i;
+                                                          break;
+                                                        }
+                                                        charCount += lines[i].length + 1;
+                                                      }
+                                                      final currentLineStart = charCount;
+                                                      final horizontalPosition = caret - currentLineStart;
+                                                      if (currentLine < lines.length - 1) {
+                                                        final nextLineText = lines[currentLine + 1];
+                                                        final targetPosition = min(horizontalPosition, nextLineText.length);
+                                                        final newCursorPosition = currentLineStart + lines[currentLine].length + 1 + targetPosition;
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: min(newCursorPosition, currentText.length))
+                                                        );
+                                                      } else {
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: currentText.length)
+                                                        );
+                                                      }
+                                                      break;
+                                    
+                                                    case LogicalKeyboardKey.arrowLeft:
+                                                      if(isShiftPressed) break;
+                                                      _suggestionNotifier.value = null;
+                                                      if(currentSelection.extentOffset > 0 && currentText.isNotEmpty){
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(
+                                                            offset: currentSelection.extentOffset - 1
+                                                          )
+                                                        );
+                                                      }
+                                                      break;
+                                                      
+                                                    case LogicalKeyboardKey.arrowRight:
+                                                      if(isShiftPressed) break;
+                                                      _suggestionNotifier.value = null;
+                                                      if(_aiNotifier.value != null){
+                                                        _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                                                        _aiNotifier.value = null;
+                                                        _aiOffsetNotifier.value = null;
+                                                        break;
+                                                      }
+                                                      if(currentText.isNotEmpty && currentSelection.extentOffset < currentText.length){
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(
+                                                            offset: currentSelection.extentOffset + 1
+                                                          )
+                                                        );
+                                                      }
+                                                      break;
+
+                                                    case LogicalKeyboardKey.tab:
+                                                      if(_aiNotifier.value != null){
+                                                        _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                                                        _aiNotifier.value = null;
+                                                        _aiOffsetNotifier.value = null;
+                                                      }
+                                                      break;
+                                                  }
+                                                }
+                                                
+                                                if(event.logicalKey != LogicalKeyboardKey.backspace){
+                                                  if(event is KeyDownEvent){
+                                                    _commonF(_controller);
+                                                  } else if(event is KeyRepeatEvent){
+                                                    _keypressTimer?.cancel();
+                                                    Timer(Duration(milliseconds: 5), ()=> _controller.refresh());
+                                                    _keypressTimer = Timer(Duration(milliseconds: 50), () {
+                                                      if(_connection == null || !_connection!.attached){
+                                                        _connection = TextInput.attach(
+                                                          _controller,
+                                                          TextInputConfiguration(
+                                                            enableDeltaModel: true,
+                                                            inputType: TextInputType.multiline,
+                                                            inputAction: TextInputAction.newline
+                                                        ));
+                                                        _connection!.show();
+                                                        _connection!.setEditingState(_controller.value);
+                                                      }
+                                                      else{
+                                                        _connection!.setEditingState(_controller.value);
+                                                      }
+                                                    });
+                                                  }
+                                                }
+                                              },
+                                              child: codeField
+                                            )
+                                          );
+                                        }
+                                      );
+                                    }
+                                  ),
+                                );
+                              }
+                            );
+                          }
+                        ),
+                      )
+                    ),
+                  ),
+                ),
+                ValueListenableBuilder<Offset?>(
+                  valueListenable: _aiOffsetNotifier,
+                  builder: (context, offvalue, child) {
+                    return _isMobile && _aiNotifier.value != null && offvalue != null && _aiNotifier.value!.isNotEmpty ? Positioned(
+                      top: offvalue.dy + (widget.textStyle?.fontSize ?? 14) * _aiNotifier.value!.split('\n').length + 15,
+                      left: offvalue.dx + (_aiNotifier.value!.split('\n')[0].length * (widget.textStyle?.fontSize ?? 14) / 2),
+                      child: Row(
+                        children: [
+                          InkWell(
+                            onTap: (){
+                              if(_aiNotifier.value == null) return;
+                              _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                              _aiNotifier.value = null;
+                              _aiOffsetNotifier.value = null;
+                            },
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: _editorTheme['root']?.backgroundColor,
+                                borderRadius: BorderRadius.all(Radius.circular(8)),
+                                border: BoxBorder.all(
+                                  width: 1.5,
+                                  color: Color(0xff64b5f6)
+                                )
+                              ),
+                              child: Icon(
+                                Icons.check,
+                                color: _editorTheme['root']?.color,
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            width: 30,
+                          ),
+                          InkWell(
+                            onTap: () {
+                              _aiNotifier.value = null;
+                              _aiOffsetNotifier.value = null;
+                            },
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: _editorTheme['root']?.backgroundColor,
+                                borderRadius: BorderRadius.all(Radius.circular(8)),
+                                border: BoxBorder.all(
+                                  width: 1.5,
+                                  color: Colors.red
+                                )
+                              ),
+                              child: Icon(
+                                Icons.close,
+                                color: _editorTheme['root']?.color,
+                              ),
+                            )
+                          )
+                        ],
+                      ),
+                    ) : SizedBox.shrink();
+                  }
+                ),
+                ValueListenableBuilder<Offset>(
+                  valueListenable: _offsetNotifier,
+                  builder: (_, pos, child){
+                    final toolbarStyle = TextStyle(color: Colors.grey[400]);
+                    final shortCutStyle = TextStyle(color: Colors.grey[600]);
+                    void copy() async {
+                      final selection = _controller.selection;
+                      final text = _controller.text;
+                      if (selection.isValid && !selection.isCollapsed) {
+                        final selectedText = text.substring(
+                          selection.start,
+                          selection.end,
+                        );
+                        Clipboard.setData(ClipboardData(text: selectedText));
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void paste() async{
+                      if(widget.readOnly) return;
+                      final data = await Clipboard.getData('text/plain');
+                      final pasteText = data?.text ?? '';
+                      if (pasteText.isNotEmpty) {
+                        final selection = _controller.selection;
+                        final text = _controller.text;
+                        final before = text.substring(0, selection.start);
+                        final after = text.substring(selection.end);
+                        final newText = before + pasteText + after;
+                        final newOffset = before.length + pasteText.length;
+                        _controller.value = _controller.value.copyWith(
+                          text: newText,
+                          selection: TextSelection.collapsed(offset: newOffset),
+                        );
+                        _commonF(_controller);
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void cut(){
+                      if(widget.readOnly) return;
+                      final selection = _controller.selection;
+                      final text = _controller.text;
+                      if (selection.isValid && !selection.isCollapsed) {
+                        final selectedText = text.substring(selection.start, selection.end);
+                        Clipboard.setData(ClipboardData(text: selectedText));
+                        final before = text.substring(0, selection.start);
+                        final after = text.substring(selection.end);
+                        final newText = before + after;
+                        _controller.value = _controller.value.copyWith(
+                          text: newText,
+                          selection: TextSelection.collapsed(offset: before.length),
+                        );
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void selectAll(){
+                      _controller.value = _controller.value.copyWith(
+                        selection: TextSelection(
+                          baseOffset: 0,
+                          extentOffset: _controller.text.length
+                        ),
+                      );
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    return pos.dx < 0 || pos.dy < 0 ? SizedBox.shrink() : _isMobile ? TextSelectionToolbar(
+                      anchorAbove: pos,
+                      anchorBelow: pos,
+                      children: [
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(left: 10),
+                          onPressed: copy,
+                          child: Text("Copy"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(left: 10),
+                          onPressed: paste,
+                          child: Text("Paste"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.zero,
+                          onPressed: cut,
+                          child: Text("Cut"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(right: 10),
+                          onPressed: selectAll,
+                          child: Text("SelectAll"),
+                        ),
+                      ]
+                    ) : Positioned(
+                      top: pos.dy,
+                      left: pos.dx,
+                      width: 200,
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: [
+                          Card(
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadiusGeometry.circular(5),
+                              side: BorderSide(
+                                color: _editorTheme['root']!.color ?? Colors.grey,
+                                width: 0.2
+                              )
+                            ),
+                            color: Color(0xff202020),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                ListTile(
+                                  dense: true,
+                                  onTap: copy,
+                                  title: Text("Copy"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + C"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                  shape: BeveledRectangleBorder(
+                                    borderRadius: BorderRadiusGeometry.vertical(
+                                      top: Radius.circular(3)
+                                    )
+                                  ),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: paste,
+                                  title: Text("Paste"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + V"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: cut,
+                                  title: Text("Cut"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + X"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: selectAll,
+                                  title: Text("SelectAll"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + A"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                  shape: BeveledRectangleBorder(
+                                    borderRadius: BorderRadiusGeometry.vertical(
+                                      bottom: Radius.circular(3)
+                                    )
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+                ),
+                ValueListenableBuilder(
+                  valueListenable: _suggestionNotifier,
+                  builder: (_, sugg, child){
+                    if(sugg == null) {
+                      _sugSelIndex = 0;
+                      _controller.isShowingSuggestions = false;
+                      return SizedBox.shrink();
+                    }
+                    _controller.isShowingSuggestions = true;
+                    return Positioned(
+                      width: screenWidth < 700 ? screenWidth * 0.63 : screenWidth * 0.3,
+                      top: _contentNotifier.value.caretOffset.dy + (widget.textStyle?.fontSize ?? 14) + 10,
+                      left: _contentNotifier.value.caretOffset.dx + 50,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: 400,
+                          maxWidth: 400,
+                          minWidth: 70
+                        ),
+                        child: Card(
+                          shape: _suggestionStyle.shape,
+                          elevation: _suggestionStyle.elevation,
+                          color: _suggestionStyle.backgroundColor,
+                          margin: EdgeInsets.zero,
+                          child: RawScrollbar(
+                            thumbVisibility: true,
+                            thumbColor: _editorTheme['root']!.color!.withAlpha(80),
+                            controller: _suggScrollController,
+                            child: ListView.builder(
+                              itemExtent: (widget.textStyle?.fontSize ?? 14) + 6.5,
+                              controller: _suggScrollController,
+                              padding: EdgeInsets.all(6),
+                              shrinkWrap: true,
+                              itemCount: sugg.length,
+                              itemBuilder: (_, indx){
+                                final item = sugg[indx];
+                                return Container(
+                                  color: _sugSelIndex == indx ? Color(0xff024281) : Colors.transparent,
+                                  child: InkWell(
+                                    canRequestFocus: false,
+                                    hoverColor: _suggestionStyle.hoverColor,
+                                    focusColor: _suggestionStyle.focusColor,
+                                    splashColor: _suggestionStyle.splashColor,
+                                    onTap: () => setState(() {
+                                      _sugSelIndex = indx;
+                                      final text = item is LspCompletion ? item.label : item as String;
+                                      _controller.insertAtCurrentCursor(text, replaceTypedChar: true);
+                                      _suggestionNotifier.value = null;
+                                    }),
+                                    child: Row(
+                                      children: [
+                                        if(item is LspCompletion) ...[
+                                          item.icon,
+                                          const SizedBox(width: 10),
+                                          Text(
+                                            item.label,
+                                            style: _suggestionStyle.textStyle
+                                          )
+                                        ],
+                                        if(item is String) Text(
+                                          item,
+                                          style: _suggestionStyle.textStyle
+                                        )
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          )
+                        ),
+                      ),
+                    );
+                  }
+                ),
+                ValueListenableBuilder(
+                  valueListenable: _hoverNotifier,
+                  builder: (_, hov, c){
+                    if(hov == null || widget.lspConfig == null) return SizedBox.shrink();
+                    final Offset position = hov[0];
+                    final Map<String, int> lineChar = hov[1];
+                    final hoverScrollController = ScrollController();
+                    final width = _isMobile ? screenWidth * 0.63 : screenWidth * 0.3;
+                    final height = _isMobile ? screenHeight * 0.4 : 550.0;
+                    return Positioned(
+                      width: width,
+                      height: height,
+                      top: (screenHeight - position.dy) < 550 ? position.dy - height : position.dy,
+                      left: (screenWidth - position.dx) < width ? position.dx - width : position.dx,
+                      child: MouseRegion(
+                        onEnter: (_) => _isHoveringPopup.value = true,
+                        onExit: (_) => _isHoveringPopup.value = false,
+                        child: Card(
+                          color: _hoverDetailsStyle.backgroundColor,
+                          shape: _hoverDetailsStyle.shape,
+                          child: FutureBuilder<String>(
+                              future: (() async{
+                                final lspConfig = widget.lspConfig;
+                                final line = lineChar['line']!;
+                                final character = lineChar['character']!;
+                                final diagnostic = _diagnosticsNotifier.value.firstWhere(
+                                  (diag) {
+                                    final diagStartLine = diag.range['start']['line'] as int;
+                                    final diagEndLine = diag.range['end']['line'] as int;
+                                    final diagStartChar = diag.range['start']['character'] as int;
+                                    final diagEndChar = diag.range['end']['character'] as int;
+                                    
+                                    if (line < diagStartLine || line > diagEndLine) {
+                                      return false;
+                                    }
+                                    
+                                    if (line == diagStartLine && line == diagEndLine) {
+                                      return character >= diagStartChar && character < diagEndChar;
+                                    } else if (line == diagStartLine) {
+                                      return character >= diagStartChar;
+                                    } else if (line == diagEndLine) {
+                                      return character < diagEndChar;
+                                    } else {
+                                      return true;
+                                    }
+                                  },
+                                  orElse: () => LspErrors(severity: 0, range: {}, message: ''),
+                                );
+                        
+                                if(diagnostic.message.isNotEmpty){
+                                  return diagnostic.message;
+                                }
+                        
+                                if(lspConfig != null){
+                                  return await lspConfig.getHover(line, character);
+                                }
+                        
+                                final hoverDetails = await lspConfig!.getHover(line, character);
+                                return hoverDetails;
+                              })(),
+                              builder: (_, snapShot) {
+                                if (snapShot.hasError) {
+                                  return SizedBox.shrink();
+                                }
+                                final data = snapShot.data;
+                                if (data == null || data.isEmpty) {
+                                  return SizedBox.shrink();
+                                }
+                                if (snapShot.connectionState == ConnectionState.waiting) {
+                                  return Text(
+                                    "Loading...",
+                                    style: _hoverDetailsStyle.textStyle,
+                                  );
+                                }
+                                return Padding(
+                                  padding: const EdgeInsets.all(8.0),
+                                  child: RawScrollbar(
+                                    controller: hoverScrollController,
+                                    thumbVisibility: true,
+                                    thumbColor: _editorTheme['root']!.color!.withAlpha(100),
+                                    child: SingleChildScrollView(
+                                      controller: hoverScrollController,
+                                      child: MarkdownBlock(
+                                        data: data,
+                                        config: MarkdownConfig.darkConfig.copy(
+                                          configs: [
+                                            PConfig(
+                                              textStyle: _hoverDetailsStyle.textStyle
+                                            ),
+                                            PreConfig(
+                                              language: widget.lspConfig?.languageId ?? "dart",
+                                              theme: _editorTheme,
+                                              textStyle: TextStyle(
+                                                fontSize: _hoverDetailsStyle.textStyle.fontSize
+                                              ),
+                                              styleNotMatched: TextStyle(
+                                                color: _editorTheme['root']!.color
+                                              ),
+                                              decoration: BoxDecoration(
+                                                borderRadius: BorderRadius.zero,
+                                                border: Border.all(
+                                                  width: 0.2,
+                                                  color: _editorTheme['root']!.color ?? Colors.grey
+                                                )
+                                              )
+                                            )
+                                          ]
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+                            ),
+                        ),
+                      ),
+                    );
+                  }
+                )
+              ],
+            ),
+          ),
+        );
+      }
+    );
+  }
+}
+
+class _CodeField extends LeafRenderObjectWidget{
+  final BuildContext context;
+  final Map<String, TextStyle> editorTheme;
+  final Mode languade;
+  final CodeForgeController controller;
+  final FocusNode focusNode;
+  final CodeSelectionStyle selectionStyle;
+  final GutterStyle gutterStyle;
+  final TextStyle? textStyle;
+  final EdgeInsets? innerPadding;
+  final ScrollController hscrollController, vscrollController;
+  final bool lineWrap, enableFolding, enableGuideLines, readOnly;
+  final CodeContent? codeContent;
+  final ValueNotifier<bool> selectionNotifier;
+  final ValueNotifier<Offset> offsetNotifier;
+  final ValueNotifier<String?> aiNotifier;
+  final ValueNotifier<Offset?> aiOffsetNotifier;
+  final ValueNotifier<List<dynamic>?> hoverNotifier;
+  final ValueNotifier<List<LspErrors>> diagnosticsNotifier;
+  final ValueNotifier<bool> isHoveringPopup;
+  final _BackspaceNotifier backspaceNotifier;
+  final bool enableGutterDivider;
+
+  const _CodeField(
+    this.context,
+    this.editorTheme,
+    this.languade,
+    this.controller,
+    this.focusNode,
+    this.textStyle,
+    this.innerPadding,
+    this.vscrollController,
+    this.hscrollController,
+    this.lineWrap,
+    this.enableFolding,
+    this.readOnly,
+    this.enableGuideLines,
+    this.codeContent,
+    this.selectionStyle,
+    this.gutterStyle,
+    this.selectionNotifier,
+    this.aiNotifier,
+    this.aiOffsetNotifier,
+    this.offsetNotifier,
+    this.hoverNotifier,
+    this.diagnosticsNotifier,
+    this.isHoveringPopup,
+    this.backspaceNotifier,
+    this.enableGutterDivider
+  );
+
+  @override
+  RenderObject createRenderObject(BuildContext context) {
+    return _CodeFieldRenderer(
+      controller: controller,
+      editorTheme: editorTheme,
+      language: languade,
+      focusNode: focusNode,
+      textStyle: textStyle,
+      innerPadding: innerPadding,
+      vscrollController: vscrollController,
+      hscrollController: hscrollController,
+      lineWrap: lineWrap,
+      enableFolding: enableFolding,
+      enableGuideLines: enableGuideLines,
+      readOnly: readOnly,
+      codeContent: codeContent,
+      selectionStyle: selectionStyle,
+      gutterStyle: gutterStyle,
+      selectionNotifier: selectionNotifier,
+      aiNotifier: aiNotifier,
+      aiOffsetNotifier: aiOffsetNotifier,
+      offsetNotifier: offsetNotifier,
+      hoverNotifier: hoverNotifier,
+      diagnosticsNotifier: diagnosticsNotifier,
+      isHoveringPopup: isHoveringPopup,
+      backspaceNotifier: backspaceNotifier,
+      enableGutterDivider: enableGutterDivider
+    );
+  }
+
+  @override
+  void updateRenderObject(BuildContext context, covariant _CodeFieldRenderer renderObject) {
+    renderObject
+      .._controller = controller
+      ..editorTheme = editorTheme
+      ..language = languade
+      ..textStyle = textStyle
+      ..lineWrap = lineWrap
+      ..enableFolding = enableFolding
+      ..enableGuideLines = enableGuideLines
+      ..codeContent = codeContent
+      ..selectionStyle = selectionStyle
+      ..gutterStyle = gutterStyle
+      ..readOnly = readOnly
+      ..innerPadding = innerPadding;
+  }
+}
+
+class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation{
+  late TextPainter tp;
+  late Mode _language;
+  late double _caretHeight = 0.0;
+  late String _langId;
+  late double _gutterWidth;
+  late final bool _enableGutterDivider;
+  late final Paint _caretPainter;
+  late final CodeSelectionStyle _selectionStyle;
+  late final GutterStyle _gutterStyle;
+  late final ValueNotifier<bool> _selectionNotifier;
+  late final ValueNotifier<String?> _aiNotifier;
+  late final ValueNotifier<Offset?> _aiOffsetNotifier;
+  late final ValueNotifier<Offset> _offsetNotifier;
+  late final ValueNotifier<List<dynamic>?> _hoverNotifier;
+  late final ValueNotifier<List<LspErrors>> _diagnosticsNotifier;
+  late final TextPainter _tempTp;
+  final ValueNotifier<bool> _isHoveringPopup;
+  final List<double> _lineTops = [], _lineHeights = [];
+  final Map<int, List<InlineSpan>> _cachedSpans  =  {};
+  final Map<int, TextPainter> _lineTpCache = {};
+  final Map<int, String> _inFlightEdits = {};
+  final _dtap = DoubleTapGestureRecognizer();
+  final _oneTap = TapGestureRecognizer();
+  final FocusNode _focusNode;
+  final ScrollController _vscrollController, _hscrollController;
+  final bool isMobile = Platform.isAndroid || Platform.isIOS;
+  Offset _currerntPosition = Offset.zero;
+  bool _draggingStartHandle = false, _draggingEndHandle = false, _lineWrap;
+  bool _enableFolding, _enableGuideLines,  _draggingCHandle = false;
+  bool _showCaret = true, _showBubble = false, _readOnly = false;
+  List<String> _lines = [];
+  List<_Pair> _cachedBracketPairs = [];
+  List<FoldRange> _foldRanges = [];
+  List<LspErrors> _diagnostics = [];
+  CodeForgeController _controller;
+  Map<String, TextStyle> _editorTheme;
+  Offset _carretOffset;
+  Timer? _caretTimer;
+  TextStyle? _textStyle;
+  EdgeInsets? _innerPadding;
+  CodeContent? _codeContent;
+  TextSelection? _lastSelection, _lastSelectionForAi;
+  Rect? _startHandleRect, _endHandleRect, _normalHandle;
+  double _gutterPadding = 0.0;
+  String? _aiResponse, _lastProcessedText;
+  TextEditingValue? _prevValue;
+
+  _CodeFieldRenderer({
+    required Map<String, TextStyle> editorTheme,
+    required Mode language,
+    required CodeForgeController controller,
+    required FocusNode focusNode,
+    required TextStyle? textStyle,
+    required EdgeInsets? innerPadding,
+    required ScrollController vscrollController,
+    required ScrollController hscrollController,
+    required bool lineWrap,
+    required bool enableFolding,
+    required bool enableGuideLines,
+    required bool readOnly,
+    required CodeContent? codeContent,
+    required CodeSelectionStyle selectionStyle,
+    required GutterStyle gutterStyle,
+    required ValueNotifier<bool> selectionNotifier,
+    required ValueNotifier<String?> aiNotifier,
+    required ValueNotifier<Offset?> aiOffsetNotifier,
+    required ValueNotifier<Offset> offsetNotifier,
+    required ValueNotifier<List<dynamic>?> hoverNotifier,
+    required ValueNotifier<List<LspErrors>> diagnosticsNotifier,
+    required ValueNotifier<bool> isHoveringPopup,
+    required _BackspaceNotifier backspaceNotifier,
+    required bool enableGutterDivider
+  }):_editorTheme = editorTheme,
+    _controller = controller,
+    _carretOffset = Offset(0, 0),
+    _focusNode = focusNode,
+    _textStyle = textStyle,
+    _innerPadding = innerPadding,
+    _vscrollController = vscrollController,
+    _hscrollController = hscrollController,
+    _lineWrap = lineWrap,
+    _enableFolding = enableFolding,
+    _enableGuideLines = enableGuideLines,
+    _readOnly = readOnly,
+    _codeContent = codeContent,
+    _language = language,
+    _selectionStyle = selectionStyle,
+    _gutterStyle = gutterStyle,
+    _selectionNotifier = selectionNotifier,
+    _aiNotifier = aiNotifier,
+    _aiOffsetNotifier = aiOffsetNotifier,
+    _offsetNotifier = offsetNotifier,
+    _hoverNotifier = hoverNotifier,
+    _diagnosticsNotifier = diagnosticsNotifier,
+    _isHoveringPopup = isHoveringPopup,
+    _enableGutterDivider = enableGutterDivider,
+    _caretPainter = Paint()
+      ..color = selectionStyle.cursorColor ?? editorTheme['root']!.color!
+      ..style = PaintingStyle.fill
+    {
+
+      _tempTp = TextPainter(
+        text: TextSpan(
+          text: "8", style: _textStyle ?? editorTheme['root']
+        ),
+        textDirection: TextDirection.ltr
+      );
+
+      _tempTp.layout();
+
+      _gutterPadding = _tempTp.width * 2;
+      _gutterWidth = _gutterStyle.gutterWidth ?? 0.0;
+
+      _vscrollController.addListener((){
+        _selectionTimer?.cancel();
+        markNeedsPaint();
+      });
+
+      _hscrollController.addListener((){
+        _selectionTimer?.cancel();
+        markNeedsPaint();
+      });
+
+      backspaceNotifier.addListener(() {
+        final idx = backspaceNotifier.lineIndex;
+        final text = backspaceNotifier.lineText;
+        _showCaret = true;
+        if (idx == null) {
+          _inFlightEdits.clear();
+        } else {
+          _inFlightEdits[idx] = text;
+        }
+        _carretOffset = Offset(
+          backspaceNotifier.caretOffset?.dx ?? _carretOffset.dx,
+          _lineTops[backspaceNotifier.lineIndex ?? 0]
+        );
+        if (idx != null) _cachedSpans.remove(idx);
+        markNeedsPaint();
+      });
+
+      _focusNode.addListener(markNeedsPaint);
+
+      String lastText = _controller.text;
+
+      _controller.addListener((){
+        final prevValue = _prevValue;
+        final currValue = _controller.value;
+        final newText = _controller.text;
+        final oldLines = lastText.split('\n');
+        final newLines = newText.split('\n');
+        final changedLines = _findChangedLines(oldLines, newLines);
+        _lines = newLines;
+        _cachedBracketPairs = _computeBracketPairs(newText);
+        
+        for (final i in changedLines) {
+          _cachedSpans.remove(i);
+        }
+        lastText = newText;
+
+        if (prevValue != null && 
+            currValue.text.length != prevValue.text.length &&
+            currValue.selection.isCollapsed) {
+          final cursorLine = _getLineAtOffset(currValue.selection.extentOffset);
+          _autoUnfoldOnEdit(cursorLine);
+        }
+
+        if (prevValue != null &&
+            currValue.selection.start != currValue.selection.end) {
+          final startLine = _getLineAtOffset(currValue.selection.start);
+          final endLine = _getLineAtOffset(currValue.selection.end);
+          _autoUnfoldOnSelection(startLine, endLine);
+        }
+
+        final oldFoldRanges = Map.fromEntries(
+          _foldRanges.map((f) => MapEntry('{f.startIndex}-{f.endIndex}', f))
+        );
+        final newFoldRanges = _getFoldRanges(_lines);
+
+        for (final newFold in newFoldRanges) {
+          final key = '{newFold.startIndex}-{newFold.endIndex}';
+          if (oldFoldRanges.containsKey(key)) {
+            final oldFold = oldFoldRanges[key]!;
+            newFold.isFolded = oldFold.isFolded;
+
+            for (final oldChild in oldFold.originallyFoldedChildren) {
+              final childKey = '{oldChild.startIndex}-{oldChild.endIndex}';
+              final matchingChild = newFoldRanges.firstWhere(
+                (f) => '{f.startIndex}-{f.endIndex}' == childKey,
+                orElse: () => FoldRange(-1, -1)
+              );
+              if (matchingChild.startIndex != -1 && 
+                  matchingChild.startIndex > newFold.startIndex && 
+                  matchingChild.endIndex <= newFold.endIndex) {
+                newFold.addOriginallyFoldedChild(matchingChild);
+              }
+            }
+          }
+        }
+        _foldRanges = newFoldRanges;
+        
+        _gutterWidth = _gutterStyle.gutterWidth ??
+          ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+        _showCaret = true;
+        _caretTimer?.cancel();
+        _caretTimer = Timer.periodic(Duration(milliseconds: 500),(timer) {
+          _showCaret = !_showCaret;
+          markNeedsPaint();
+        });
+
+        final cursorPosition = _controller.selection.extentOffset.clamp(0, _controller.text.length);
+        final textBeforeCursor = _controller.text.substring(0, cursorPosition);
+        final lastTypedChar = textBeforeCursor.isNotEmpty
+          ? textBeforeCursor[textBeforeCursor.length - 1].replaceAll("\n", '')
+          : '';
+          
+        if (_lastProcessedText == newText &&
+            _aiResponse != null &&
+            _aiResponse!.isNotEmpty &&
+            _lastSelectionForAi != _controller.selection)
+          {
+          _aiNotifier.value = null;
+          _aiOffsetNotifier.value = null;
+        }
+        _lastSelectionForAi = _controller.selection;
+
+        
+
+        if (_aiResponse != null && _aiResponse!.isNotEmpty && lastTypedChar.isNotEmpty) {
+          if (_aiResponse![0] == lastTypedChar) {
+            _aiResponse = _aiResponse!.substring(1);
+            if (_aiResponse!.isEmpty) {
+              _aiNotifier.value = null;
+              _aiOffsetNotifier.value = null;
+            }
+          } else {
+            _aiNotifier.value = null;
+            _aiOffsetNotifier.value = null;
+          }
+        }
+        
+        if(
+          currValue.text == prevValue?.text &&
+          currValue.selection.extentOffset != prevValue?.selection.extentOffset
+        ){
+            _showBubble = true;
+            return;
+        } else {
+          _showBubble = false;
+        }
+
+        _prevValue = currValue;
+
+        if (_lastProcessedText == newText) return;
+        _lastProcessedText = newText;
+      });
+
+      _aiNotifier.addListener((){
+        _aiResponse = _aiNotifier.value;
+        _aiOffsetNotifier.value = _codeContent?.caretOffset;
+        markNeedsLayout();
+        markNeedsPaint();
+      });
+
+      _langId = language.hashCode.toString();
+      highlight.registerLanguage(_langId, _language);
+
+      _diagnosticsNotifier.addListener((){
+        _diagnostics = _diagnosticsNotifier.value;
+      });
+  }
+
+  Map<String, TextStyle> get editorTheme => _editorTheme;
+
+  set codeContent(CodeContent? cc){
+    if(cc == null) return;
+    if(cc.hashCode == _codeContent.hashCode) return;
+    
+    _codeContent = cc;
+    tp = _codeContent?.tp ?? TextPainter(textDirection: TextDirection.ltr);
+    final tpWidth = _lineWrap
+        ? size.width - (_innerPadding?.left ?? 0) - (_innerPadding?.right ?? 0)
+        : double.infinity;
+    tp.layout(maxWidth: tpWidth);
+    _carretOffset = cc.caretOffset;
+    _caretHeight = tp.getFullHeightForCaret(
+      TextPosition(offset: cc.currentSelection.extentOffset),
+      Rect.zero
+    );
+
+    if (_lastSelection != _controller.selection) {
+      _lastSelection = _controller.selection;
+      markNeedsPaint();
+      _ensureCaretVisible();
+    }
+  }
+
+  set selectionStyle(CodeSelectionStyle selectionStyle){
+    if(identical(selectionStyle, _selectionStyle)) return;
+    _selectionStyle = selectionStyle;
+    markNeedsPaint();
+  }
+
+  set gutterStyle(GutterStyle gs){
+    if(identical(_gutterStyle, gs)) return;
+    _gutterStyle = _gutterStyle;
+    markNeedsPaint();
+  }
+
+  set enableFolding(bool fl){
+    if(_enableFolding == fl) return;
+    _enableFolding = fl;
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+  
+  set enableGuideLines(bool gl){
+    if(_enableGuideLines == gl) return;
+    _enableGuideLines = gl;
+    markNeedsPaint();
+  }
+
+  set lineWrap(bool lw){
+    if(lw == _lineWrap) return;
+    _lineWrap = lw;
+    markNeedsLayout();
+  }
+
+  set editorTheme(Map<String, TextStyle> et) {
+    if (identical(et, _editorTheme)) return;
+    _editorTheme = et;
+    
+    _tempTp.text = TextSpan(
+      text: "8", 
+      style: _textStyle ?? _editorTheme['root']
+    );
+    _tempTp.layout();
+    
+    _gutterPadding = _tempTp.width * 2;
+    _gutterWidth = _gutterStyle.gutterWidth ?? 
+      ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+    
+    _lineTpCache.clear();
+    _cachedSpans.clear();
+    
+    markNeedsLayout();
+  }
+
+  set language(Mode lang){
+    if(identical(lang, _language)) return;
+    _language = lang;
+    _langId = lang.hashCode.toString();
+    highlight.registerLanguage(_langId, lang);
+    markNeedsPaint();
+  }
+
+  set innerPadding(EdgeInsets? p){
+    if(identical(p, _innerPadding)) return;
+    _innerPadding = p;
+    markNeedsLayout();
+  }
+
+  set readOnly(bool ro) {
+    if (_readOnly == ro) return;
+    _readOnly = ro;
+    
+    // Close text input connection when readonly
+    if (_readOnly && _controller.connection != null) {
+      _controller.connection?.close();
+      _controller.connection = null;
+    }
+    
+    markNeedsPaint();
+  }
+
+  set textStyle(TextStyle? ts){
+      if(identical(ts, _textStyle)) return;
+      _textStyle = ts;
+      
+      _tempTp.text = TextSpan(
+        text: "8", 
+        style: _textStyle ?? _editorTheme['root']
+      );
+      _tempTp.layout();
+      
+      _gutterPadding = _tempTp.width * 2;
+      _gutterWidth = _gutterStyle.gutterWidth ?? 
+        ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+      
+      _lineTpCache.clear();
+      _cachedSpans.clear();
+      
+      markNeedsLayout();
+      markNeedsPaint();
+    }
+
+  List<int> _findChangedLines(List<String> oldLines, List<String> newLines) {
+    final changed = <int>[];
+    final maxLen = max(oldLines.length, newLines.length);
+    for (int i = 0; i < maxLen; i++) {
+      final oldLine = i < oldLines.length ? oldLines[i] : '';
+      final newLine = i < newLines.length ? newLines[i] : '';
+      if (oldLine != newLine) {
+        changed.add(i);
+      }
+    }
+    return changed;
+  }
+
+  List<TextSpan> _convert(
+    List<Node> nodes, [
+    int startOffset = 0,
+  ]) {
+    List<TextSpan> spans = [];
+    int offset = startOffset;
+
+    for (final node in nodes) {
+      if (node.value != null) {
+        final nodeLines = node.value!.split('\n');
+        for (int lineIdx = 0; lineIdx < nodeLines.length; lineIdx++) {
+          final line = nodeLines[lineIdx];
+          if (line.isNotEmpty) {
+            spans.add(TextSpan(
+              text: line,
+              style: editorTheme[node.className ?? ''],
+            ));
+          }
+          if (lineIdx != nodeLines.length - 1) {
+            spans.add(const TextSpan(text: '\n'));
+          }
+        }
+        offset += node.value!.length;
+      } else if (node.children != null) {
+        final inner = _convert(node.children!, offset);
+        spans.add(TextSpan(
+          children: inner,
+          style: editorTheme[node.className ?? ''],
+        ));
+        offset += _textLengthFromSpans(inner);
+      }
+    }
+
+    return spans;
+  }
+
+  int _textLengthFromSpans(List<InlineSpan> spans) {
+    int length = 0;
+    for (final span in spans) {
+      if (span is TextSpan && span.text != null) {
+        length += span.text!.length;
+      }
+      if (span is TextSpan && span.children != null) {
+        length += _textLengthFromSpans(span.children!);
+      }
+    }
+    return length;
+  }
+
+  List<InlineSpan> _applyBracketHighlight(
+    List<InlineSpan> spans,
+    int lineStart,
+    int? b1,
+    int? b2,
+    Set<int> unmatched,
+  ) {
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+
+        if (text != null) {
+          bool needsHighlighting = false;
+          for (int i = 0; i < text.length; i++) {
+            final globalIdx = offset + i;
+            if (unmatched.contains(globalIdx) || globalIdx == b1 || globalIdx == b2) {
+              needsHighlighting = true;
+              break;
+            }
+          }
+
+          if (needsHighlighting) {
+            List<TextSpan> charSpans = [];
+            for (int i = 0; i < text.length; i++) {
+              final globalIdx = offset + i;
+              TextStyle? charStyle = span.style;
+
+              if (unmatched.contains(globalIdx)) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  color: Colors.red,
+                  decoration: TextDecoration.underline,
+                  decorationStyle: TextDecorationStyle.wavy,
+                );
+              } else if (globalIdx == b1 || globalIdx == b2) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  background: Paint()
+                    ..style = PaintingStyle.stroke
+                    ..strokeWidth = 1.2
+                    ..color = editorTheme['root']?.color ?? Colors.white,
+                );
+              }
+
+              charSpans.add(TextSpan(text: text[i], style: charStyle));
+            }
+            result.add(TextSpan(children: charSpans));
+          } else {
+            result.add(span);
+          }
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applyBracketHighlight(children, offset, b1, b2, unmatched);
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += _textLengthFromSpans(childSpans);
+        }
+      }
+    }
+    return result;
+  }
+  
+  List<InlineSpan> _applyDiagnosticsStyling(
+    List<InlineSpan> spans,
+    int lineIndex,
+    int lineStart,
+  ) {
+    if (_diagnostics.isEmpty) return spans;
+    
+    final lineDiagnostics = _diagnostics.where((diag) {
+      final startLine = diag.range['start']['line'] as int;
+      final endLine = diag.range['end']['line'] as int;
+      return lineIndex >= startLine && lineIndex <= endLine;
+    }).toList();
+    
+    if (lineDiagnostics.isEmpty) return spans;
+    
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+    
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+        
+        if (text != null) {
+          int spanStart = offset;
+          int spanEnd = offset + text.length;
+          
+          bool hasDiagnostic = false;
+          Color? diagnosticColor;
+          
+          for (final diag in lineDiagnostics) {
+            final diagStartLine = diag.range['start']['line'] as int;
+            final diagEndLine = diag.range['end']['line'] as int;
+            final diagStartChar = diag.range['start']['character'] as int;
+            final diagEndChar = diag.range['end']['character'] as int;
+            
+            int diagStart, diagEnd;
+            
+            if (diagStartLine == lineIndex && diagEndLine == lineIndex) {
+              diagStart = lineStart + diagStartChar;
+              diagEnd = lineStart + diagEndChar;
+            } else if (diagStartLine == lineIndex) {
+              diagStart = lineStart + diagStartChar;
+              diagEnd = spanEnd;
+            } else if (diagEndLine == lineIndex) {
+              diagStart = lineStart;
+              diagEnd = lineStart + diagEndChar;
+            } else {
+              diagStart = lineStart;
+              diagEnd = spanEnd;
+            }
+            
+            if (!(spanEnd <= diagStart || spanStart >= diagEnd)) {
+              hasDiagnostic = true;
+              diagnosticColor = switch (diag.severity) {
+                1 => Colors.red,
+                2 => Colors.amber,
+                3 => Colors.blueAccent,
+                _ => null,
+              };
+              break;
+            }
+          }
+          
+          if (hasDiagnostic && diagnosticColor != null) {
+            List<TextSpan> charSpans = [];
+            
+            for (int i = 0; i < text.length; i++) {
+              final globalIdx = spanStart + i;
+              bool inDiagnostic = false;
+              Color? charDiagColor;
+              
+              for (final diag in lineDiagnostics) {
+                final diagStartLine = diag.range['start']['line'] as int;
+                final diagEndLine = diag.range['end']['line'] as int;
+                final diagStartChar = diag.range['start']['character'] as int;
+                final diagEndChar = diag.range['end']['character'] as int;
+                
+                int diagStart, diagEnd;
+                
+                if (diagStartLine == lineIndex && diagEndLine == lineIndex) {
+                  diagStart = lineStart + diagStartChar;
+                  diagEnd = lineStart + diagEndChar;
+                } else if (diagStartLine == lineIndex) {
+                  diagStart = lineStart + diagStartChar;
+                  diagEnd = lineStart + text.length;
+                } else if (diagEndLine == lineIndex) {
+                  diagStart = lineStart;
+                  diagEnd = lineStart + diagEndChar;
+                } else {
+                  diagStart = lineStart;
+                  diagEnd = lineStart + text.length;
+                }
+                
+                if (globalIdx >= diagStart && globalIdx < diagEnd) {
+                  inDiagnostic = true;
+                  charDiagColor = switch (diag.severity) {
+                    1 => Colors.red,
+                    2 => Colors.amber,
+                    3 => Colors.blueAccent,
+                    _ => null,
+                  };
+                  break;
+                }
+              }
+              
+              TextStyle? charStyle = span.style;
+              if (inDiagnostic && charDiagColor != null) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  decoration: TextDecoration.underline,
+                  decorationStyle: TextDecorationStyle.wavy,
+                  decorationThickness: 2,
+                  decorationColor: charDiagColor,
+                );
+              }
+              
+              charSpans.add(TextSpan(text: text[i], style: charStyle));
+            }
+            
+            result.add(TextSpan(children: charSpans));
+          } else {
+            result.add(span);
+          }
+          
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applyDiagnosticsStyling(children, lineIndex, offset);
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += _textLengthFromSpans(childSpans);
+        }
+      }
+    }
+    
+    return result;
+  }
+
+  List<InlineSpan> _applySelectionToSpans(
+    List<InlineSpan> spans,
+    int lineStart,
+    int selectionStart,
+    int selectionEnd,
+    Color selectedColor,
+  ) {
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+  
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+  
+        if (text != null) {
+          int spanStart = offset;
+          int spanEnd = offset + text.length;
+  
+          if (selectionEnd <= spanStart || selectionStart >= spanEnd) {
+            result.add(span);
+          } else {
+            int selStartInSpan = max(selectionStart - spanStart, 0);
+            int selEndInSpan = min(selectionEnd - spanStart, text.length);
+  
+            if (selStartInSpan > 0) {
+              result.add(TextSpan(
+                text: text.substring(0, selStartInSpan),
+                style: span.style,
+              ));
+            }
+            result.add(TextSpan(
+              text: text.substring(selStartInSpan, selEndInSpan),
+              style: span.style?.copyWith(
+                backgroundColor: selectedColor
+              ) ?? TextStyle(backgroundColor: _selectionStyle.selectionColor),
+            ));
+            if (selEndInSpan < text.length) {
+              result.add(TextSpan(
+                text: text.substring(selEndInSpan),
+                style: span.style,
+              ));
+            }
+          }
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applySelectionToSpans(
+            children,
+            offset,
+            selectionStart,
+            selectionEnd,
+            selectedColor,
+          );
+          final childrenLength = childSpans.fold<int>(0, (sum, s) {
+            if (s is TextSpan && s.text != null) {
+              return sum + s.text!.length;
+            }
+            return sum;
+          });
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += childrenLength;
+        }
+      }
+    }
+    return result;
+  }
+
+  Set<int> _findUnmatchedBrackets(String text) {
+    final stack = <int>[];
+    final unmatched = <int>{};
+    const pairs = {'(': ')', '{': '}', '[': ']', "'": "'", '"': '"'};
+    const openers = {'(', '{', '[', "'", '"'};
+    const closers = {')', '}', ']', "'", '"'};
+    String? currentStringQuote;
+
+    for (int i = 0; i < text.length; i++) {
+      final char = text[i];
+
+      if (char == '"' || char == "'") {
+        if (currentStringQuote == null) {
+          currentStringQuote = char;
+          stack.add(i);
+        } else if (currentStringQuote == char) {
+          if (stack.isNotEmpty && text[stack.last] == char) {
+            stack.removeLast();
+            currentStringQuote = null;
+          } else {
+            unmatched.add(i);
+          }
+        } else {
+          continue;
+        }
+        continue;
+      }
+
+      if (currentStringQuote != null) continue;
+
+      if (openers.contains(char)) {
+        stack.add(i);
+      } else if (closers.contains(char)) {
+        if (stack.isEmpty) {
+          unmatched.add(i);
+        } else {
+          final lastOpen = stack.last;
+          final openChar = text[lastOpen];
+          if (pairs[openChar] == char) {
+            stack.removeLast();
+          } else {
+            unmatched.add(i);
+          }
+        }
+      }
+    }
+
+    unmatched.addAll(stack);
+    
+    return unmatched;
+  }
+
+  int? _findMatchingBracket(String text, int pos) {
+    const Map<String, String> pairs = {
+      '(': ')',
+      '{': '}',
+      '[': ']',
+      ')': '(',
+      '}': '{',
+      ']': '[',
+    };
+    const String openers = '({[';
+
+    if (pos < 0 || pos >= text.length) return null;
+
+    final char = text[pos];
+    if (!pairs.containsKey(char)) return null;
+
+    final match = pairs[char]!;
+    final isForward = openers.contains(char);
+
+    int depth = 0;
+    if (isForward) {
+      for (int i = pos + 1; i < text.length; i++) {
+        if (text[i] == char) depth++;
+        if (text[i] == match) {
+          if (depth == 0) return i;
+          depth--;
+        }
+      }
+    } else {
+      for (int i = pos - 1; i >= 0; i--) {
+        if (text[i] == char) depth++;
+        if (text[i] == match) {
+          if (depth == 0) return i;
+          depth--;
+        }
+      }
+    }
+    return null;
+  }
+
+  int _findFirstVisibleLine(double viewTop) {
+    if(_lineTops.isEmpty) return 0;
+    int low = 0, high = _lineTops.length - 1, mid;
+    while (low < high) {
+      mid = (low + high) >> 1;
+      if (_lineTops[mid] < viewTop) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low.clamp(0, _lineTops.length - 1);
+  }
+
+  int _findLastVisibleLine(double viewBottom) {
+    if (_lineTops.isEmpty) return 0;
+    int low = 0, high = _lineTops.length - 1, mid;
+    while (low < high) {
+      mid = (low + high + 1) >> 1;
+      if (_lineTops[mid] <= viewBottom) {
+        low = mid;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return low.clamp(0, _lineTops.length - 1);
+  }
+
+  List<_Pair> _computeBracketPairs(String text) {
+    final pairs = <_Pair>[];
+    final stack = <int>[];
+    const openers = {'(', '{', '['};
+    const closers = {')', '}', ']'};
+    const matching = {'(': ')', '{': '}', '[': ']'};
+
+    for (int i = 0; i < text.length; i++) {
+      final ch = text[i];
+      if (openers.contains(ch)) {
+        stack.add(i);
+      } else if (closers.contains(ch)) {
+        if (stack.isNotEmpty) {
+          final open = stack.removeLast();
+          final openChar = text[open];
+          if (matching[openChar] == ch) {
+            pairs.add(_Pair(open, i));
+          }
+        }
+      }
+    }
+    return pairs;
+  }
+
+  Map<String,int> _indexToLineCol(int idx, List<int> lineStarts, List<String> lines) {
+    int low = 0, high = lineStarts.length - 1;
+    while (low <= high) {
+      int mid = (low + high) >> 1;
+      if (lineStarts[mid] <= idx) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    final int line = high.clamp(0, lineStarts.length - 1);
+    final int col = idx - lineStarts[line];
+    return {'line': line, 'col': col};
+  }
+
+  TextPainter _getLinePainter(int line, List<InlineSpan> baseSpans, double maxWidth, TextStyle defaultStyle) {
+    final cached = _lineTpCache[line];
+    if (cached != null) return cached;
+    final tpLine = TextPainter(
+      text: TextSpan(style: defaultStyle, children: baseSpans),
+      textDirection: TextDirection.ltr,
+    );
+    tpLine.layout(maxWidth: maxWidth);
+    _lineTpCache[line] = tpLine;
+    return tpLine;
+  }
+
+  Set<int> _findUnmatchedQuotesInLine(String lineText, int lineStartOffset) {
+    final unmatched = <int>{};
+    int? unclosedStringStart;
+
+    for (int i = 0; i < lineText.length; i++) {
+      final char = lineText[i];
+      final globalIdx = lineStartOffset + i;
+
+      if (char == '"' || char == "'") {
+        if (unclosedStringStart == null) {
+          unclosedStringStart = globalIdx;
+        } else {
+          final openingQuoteChar = lineText[unclosedStringStart - lineStartOffset];
+          if (openingQuoteChar == char) {
+            unclosedStringStart = null;
+          }
+        }
+        continue;
+      }
+    }
+
+    if (unclosedStringStart != null) {
+      for (int i = (unclosedStringStart - lineStartOffset); i < lineText.length; i++) {
+        unmatched.add(lineStartOffset + i);
+      }
+    }
+    
+    return unmatched;
+  }
+
+  List<FoldRange> _getFoldRanges(List<String> lines) {
+    List<FoldRange> foldRanges = [];
+    if (!_enableFolding) return foldRanges;
+    
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      if (line.trim().isEmpty || !line.trim().endsWith(':')) continue;
+      
+      final startIndent = line.length - line.trimLeft().length;
+      int j = i + 1;
+      
+      while (j < lines.length) {
+        final next = lines[j];
+        if (next.trim().isEmpty) {
+          j++;
+          continue;
+        }
+        final nextIndent = next.length - next.trimLeft().length;
+        if (nextIndent <= startIndent) break;
+        j++;
+      }
+      
+      if (j > i + 1 && j <= lines.length) {
+        foldRanges.add(FoldRange(i, j - 1));
+      }
+    }
+    
+    final Map<String, List<int>> stacks = {"{": [], "[": [], "(": []};
+    const Map<String, String> matchingBrackets = {"{": "}", "[": "]", "(": ")"};
+    
+    for (final openBracket in matchingBrackets.keys) {
+      final closeBracket = matchingBrackets[openBracket]!;
+      for (int i = 0; i < lines.length; i++) {
+        if (lines[i].contains(openBracket)) stacks[openBracket]!.add(i);
+        if (lines[i].contains(closeBracket)) {
+          if (stacks[openBracket]!.isNotEmpty) {
+            int start = stacks[openBracket]!.removeLast();
+            if (i > start) {
+              bool conflictsWithColonFold = foldRanges.any((fold) => 
+                (fold.startIndex == start && fold.endIndex == i) ||
+                (fold.startIndex == start) ||
+                (fold.endIndex == i && fold.startIndex < start)
+              );
+              
+              if (!conflictsWithColonFold) {
+                foldRanges.add(FoldRange(start, i));
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    foldRanges.sort((a, b) => a.startIndex.compareTo(b.startIndex));
+    
+    return foldRanges;
+  }
+
+  Map<String, int> _offsetToLineChar(int offset) {
+    final lines = _controller.text.split('\n');
+    int accum = 0;
+    for (int i = 0; i < lines.length; i++) {
+      final lineLen = lines[i].length;
+      if (offset >= accum && offset <= accum + lineLen) {
+        return {
+          'line': i,
+          'character': offset - accum,
+        };
+      }
+      accum += lineLen + 1;
+    }
+    final last = lines.length - 1;
+    return {
+      'line': last,
+      'character': lines.isNotEmpty ? lines.last.length : 0,
+    };
+  }
+
+  bool _isOffsetOverWord(int offset) {
+    final text = _controller.text;
+    if (offset < 0 || offset >= text.length) return false;
+    return RegExp(r'\w').hasMatch(text[offset]);
+  }
+
+  int _getGlobalPositionFromVisible(int visiblePosition) {
+    final lines = _controller.text.split('\n');
+    int visibleOffset = 0;
+    int globalOffset = 0;
+
+    for (int i = 0; i < lines.length; i++) {
+      final isFolded = _foldRanges.any((fold) => 
+        fold.isFolded && i > fold.startIndex && i <= fold.endIndex);
+
+      if (!isFolded) {
+        final lineLength = lines[i].length;
+        if (visiblePosition >= visibleOffset && visiblePosition <= visibleOffset + lineLength) {
+          return globalOffset + (visiblePosition - visibleOffset);
+        }
+        visibleOffset += lineLength + 1;
+        globalOffset += lineLength + 1;
+      } else {
+        globalOffset += lines[i].length + 1;
+      }
+    }
+    return globalOffset;
+  }
+
+  bool _isWordBoundary(String char) {
+    return char.trim().isEmpty || !RegExp(r'\w').hasMatch(char);
+  }
+
+  List<String> _buildDisplayLinesWithAI() {
+    if (_aiResponse != null && _aiResponse!.isNotEmpty && _controller.selection.isValid) {
+      final cursorPosition = _controller.selection.extentOffset;
+      final before = _controller.text.substring(0, cursorPosition);
+      final after = _controller.text.substring(cursorPosition);
+      return (before + _aiResponse! + after).split('\n');
+    } 
+    return _controller.text.split('\n');
+    
+  }
+
+  void _toggleFold(FoldRange fold) {
+    if (fold.isFolded) {
+      _unfoldWithChildren(fold);
+    } else {
+      _foldWithChildren(fold);
+    }
+    _controller.folds = _foldRanges;
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+
+  void _foldWithChildren(FoldRange parentFold) {
+    parentFold.clearOriginallyFoldedChildren();
+    
+    for (final childFold in _foldRanges) {
+      if (childFold.isFolded && 
+          childFold != parentFold &&
+          childFold.startIndex > parentFold.startIndex && 
+          childFold.endIndex <= parentFold.endIndex) {
+        parentFold.addOriginallyFoldedChild(childFold);
+        childFold.isFolded = false;
+      }
+    }
+    
+    parentFold.isFolded = true;
+  }
+
+  void _unfoldWithChildren(FoldRange parentFold) {
+    parentFold.isFolded = false;
+    for (final childFold in parentFold.originallyFoldedChildren) {
+      if (childFold.startIndex > parentFold.startIndex && 
+          childFold.endIndex <= parentFold.endIndex) {
+        childFold.isFolded = true;
+      }
+    }
+    parentFold.clearOriginallyFoldedChildren();
+  }
+
+  int _getLineAtOffset(int offset) {
+    final text = _controller.text;
+    final beforeCursor = text.substring(0, offset.clamp(0, text.length));
+    return beforeCursor.split('\n').length - 1;
+  }
+  
+ void _autoUnfoldOnEdit(int lineIndex) {
+  bool needsUpdate = false;
+  
+  for (final fold in _foldRanges) {
+    if (fold.isFolded && 
+        (fold.startIndex == lineIndex || 
+         (lineIndex > fold.startIndex && lineIndex <= fold.endIndex))) {
+      fold.isFolded = false;
+      
+      for (final child in fold.originallyFoldedChildren) {
+        child.isFolded = true;
+      }
+      fold.clearOriginallyFoldedChildren();
+      
+      needsUpdate = true;
+    }
+  }
+  
+  if (needsUpdate) {
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+}
+
+  void _autoUnfoldOnSelection(int startLine, int endLine) {
+    bool needsUpdate = false;
+    
+    for (final fold in _foldRanges) {
+      if (!fold.isFolded) continue;
+      
+      final selectionAffectsFold = 
+        (startLine <= fold.startIndex && endLine >= fold.startIndex) ||
+        (startLine <= fold.endIndex && endLine >= fold.endIndex) ||
+        (startLine > fold.startIndex && endLine <= fold.endIndex) ||
+        (startLine >= fold.startIndex && startLine <= fold.endIndex) ||
+        (endLine >= fold.startIndex && endLine <= fold.endIndex);
+      
+      if (selectionAffectsFold) {
+        fold.isFolded = false;
+        
+        for (final child in fold.originallyFoldedChildren) {
+          child.isFolded = true;
+        }
+        fold.clearOriginallyFoldedChildren();
+        
+        needsUpdate = true;
+      }
+    }
+    
+    if (needsUpdate) {
+      markNeedsLayout();
+      markNeedsPaint();
+    }
+  }
+
+  void _drawIndentationGuidelines(Canvas canvas, Offset offset, List<String> displayLines, int firstVisibleLine, int lastVisibleLine, double maxLinePainterWidth) {
+    if (!_enableGuideLines) return;
+    
+    final tempMeasure = TextPainter(
+      text: TextSpan(
+        text: " ",
+        style: _textStyle ?? _editorTheme['root']
+      ),
+      textDirection: TextDirection.ltr
+    );
+    tempMeasure.layout();
+
+    final double charWidth = tempMeasure.width;
+    final viewTop = _vscrollController.offset;
+    final viewBottom = viewTop + _vscrollController.position.viewportDimension;
+    final cursorPosition = _controller.selection.extentOffset;
+    final textBeforeCursor = _controller.text.substring(0, cursorPosition.clamp(0, _controller.text.length));
+    final currentLine = textBeforeCursor.split('\n').length - 1;
+    final tabSize = 4;
+    List<({int startLine, int endLine, int indentLevel})> blocks = [];
+    
+    for (int i = 0; i < displayLines.length; i++) {
+      if (_foldRanges.any((fold) => fold.isFolded && i > fold.startIndex && i <= fold.endIndex)) {
+        continue;
+      }
+      
+      final line = displayLines[i];
+      if (!line.trimRight().endsWith(':')) continue;
+      
+      final indent = line.length - line.trimLeft().length;
+      final indentLevel = indent ~/ tabSize;
+      
+      int endLine = i + 1;
+      while (endLine < displayLines.length) {
+        final nextLine = displayLines[endLine];
+        if (nextLine.trim().isEmpty) {
+          endLine++;
+          continue;
+        }
+        final nextIndent = nextLine.length - nextLine.trimLeft().length;
+        if (nextIndent <= indent) break;
+        endLine++;
+      }
+      
+      if (endLine <= i + 1) continue;
+      if (i + 1 >= _lineTops.length || endLine - 1 >= _lineTops.length || endLine - 1 >= _lineHeights.length) continue;
+      
+      blocks.add((startLine: i, endLine: endLine, indentLevel: indentLevel));
+    }
+    
+    int? selectedBlockIndex;
+    int minBlockSize = 999999;
+    
+    for (int idx = 0; idx < blocks.length; idx++) {
+      final block = blocks[idx];
+      if (currentLine >= block.startLine && currentLine < block.endLine) {
+        final blockSize = block.endLine - block.startLine;
+        if (blockSize < minBlockSize) {
+          minBlockSize = blockSize;
+          selectedBlockIndex = idx;
+        }
+      }
+    }
+    
+    for (int idx = 0; idx < blocks.length; idx++) {
+      final block = blocks[idx];
+      final isSelected = selectedBlockIndex == idx;
+      
+      final Paint guidePaint = Paint()
+        ..color = isSelected
+            ? (_editorTheme['root']?.color ?? Colors.grey)
+            : (_editorTheme['root']?.color ?? Colors.grey).withAlpha(100)
+        ..strokeWidth = isSelected ? 0.7 : 0.3
+        ..style = PaintingStyle.stroke;
+      
+      final double yTop = offset.dy
+        + (_innerPadding?.top ?? 0)
+        + _lineTops[block.startLine + 1]
+        - _vscrollController.offset;
+      
+      final double yBottom = offset.dy
+        + (_innerPadding?.top ?? 0)
+        + _lineTops[block.endLine - 1]
+        + _lineHeights[block.endLine - 1]
+        - _vscrollController.offset;
+      
+      if (yBottom < 0 || yTop > viewBottom) continue;
+      
+      final double guideX = offset.dx
+        + _gutterWidth
+        + (_innerPadding?.left ?? 0)
+        + ((block.indentLevel * charWidth) * tabSize)
+        - (_lineWrap ? 0 : _hscrollController.offset);
+      
+      final double clampedYTop = yTop.clamp(0.0, viewBottom);
+      final double clampedYBottom = yBottom.clamp(0.0, viewBottom);
+      
+      if (guideX >= _gutterWidth && guideX <= size.width) {
+        canvas.drawLine(
+          Offset(guideX, clampedYTop),
+          Offset(guideX, clampedYBottom),
+          guidePaint
+        );
+      }
+    }
+  }
+  
+  @override
+  bool hitTestSelf(Offset position) => true;
+
+  int? _dragStartOffset;
+  Timer? _selectionTimer, _hoverTimer;
+  bool _selectionActive = false, _isDragging = false;
+  Offset? _pointerDownPosition;
+
+  @override
+  void handleEvent(PointerEvent event, covariant BoxHitTestEntry entry) {
+    final localPosition = event.localPosition;
+    _currerntPosition = localPosition;
+    final padded = Offset(
+      localPosition.dx
+        - (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+        + _hscrollController.offset
+        - _gutterWidth,
+      localPosition.dy
+        - (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+        + _vscrollController.offset
+    );
+    TextPosition offset = _codeContent?.tp.getPositionForOffset(padded)
+    ?? TextPosition(offset: _controller.selection.extentOffset);
+
+    final globalOffset = _getGlobalPositionFromVisible(offset.offset);
+    if (globalOffset != -1) {
+      offset = TextPosition(offset: globalOffset);
+    }
+
+    if(event is PointerHoverEvent){
+      if(!(_hoverNotifier.value != null && _isHoveringPopup.value)){
+        _hoverNotifier.value = null;
+      }
+      
+      if(
+        (_hoverNotifier.value == null || !_isHoveringPopup.value) &&
+        _isOffsetOverWord(offset.offset)
+        ){
+        _hoverTimer?.cancel();
+        _hoverTimer = Timer(Duration(milliseconds: 1500), (){
+          final lineChar = _offsetToLineChar(offset.offset);
+          _hoverNotifier.value = [event.localPosition, lineChar];
+        });
+      } else {
+        _hoverNotifier.value = null;
+      }
+    }
+
+    void select(){
+      _selectionActive = _selectionNotifier.value = true;
+      final text = _controller.text;
+      final pos = offset.offset;
+      int start = pos, end = pos;
+      while (start > 0 && !_isWordBoundary(text[start - 1])) {
+        start--;
+      }
+      while (end < text.length && !_isWordBoundary(text[end])) {
+        end++;
+      }
+      _controller.selection = TextSelection(baseOffset: start, extentOffset: end);
+    }
+
+    if(
+      event is PointerDownEvent && event.buttons == kSecondaryButton ||
+      event is PointerUpEvent && isMobile && _selectionActive
+    ){
+      _offsetNotifier.value = event.localPosition;   
+    }
+
+    if (event is PointerDownEvent && event.buttons == kPrimaryButton) {
+      if(_offsetNotifier.value.dx > 0 || _offsetNotifier.value.dy > 0){
+        _offsetNotifier.value = Offset(-1, -1);
+      }
+
+      _dragStartOffset = offset.offset;
+      _dtap.addPointer(event);
+      _oneTap.addPointer(event);
+
+
+      if (isMobile) {
+        _dtap.onDoubleTap = (){
+          select();
+          _offsetNotifier.value = event.localPosition;
+        };
+
+        _oneTap.onTap = (){
+          if(_hoverNotifier.value != null) {
+            _hoverNotifier.value = null;
+          } else if(_isOffsetOverWord(offset.offset)) {
+            final lineChar = _offsetToLineChar(offset.offset);
+            _hoverNotifier.value = [localPosition, lineChar];
+          }
+        };
+
+        _draggingCHandle = false;
+        _draggingStartHandle = false;
+        _draggingEndHandle = false;
+        if (_controller.selection.baseOffset != _controller.selection.extentOffset) {
+          if (_startHandleRect?.contains(event.localPosition) ?? false) {
+            _draggingStartHandle = true;
+            _selectionActive = _selectionNotifier.value = true;
+            _pointerDownPosition = event.localPosition;
+            return;
+          }
+          if (_endHandleRect?.contains(event.localPosition) ?? false) {
+            _draggingEndHandle = true;
+            _selectionActive = _selectionNotifier.value = true;
+            _pointerDownPosition = event.localPosition;
+            return;
+          }
+        } else if(_normalHandle?.contains(event.localPosition) ?? false) {
+          _draggingCHandle = true;
+          _draggingStartHandle = _draggingEndHandle = false;
+          _selectionActive = _selectionNotifier.value = true;
+          _controller.selection = TextSelection.collapsed(offset: offset.offset);
+          _pointerDownPosition = event.localPosition;
+          return;
+        }
+
+        _dragStartOffset = offset.offset;
+        _isDragging = false;
+        _pointerDownPosition = event.localPosition;
+        _selectionActive = _selectionNotifier.value = false;
+        _selectionTimer?.cancel();
+        _selectionTimer = Timer(const Duration(milliseconds: 500), select);
+      } else{
+        _controller.selection = TextSelection.collapsed(offset: offset.offset);
+      }
+
+      for (final fold in _foldRanges) {
+        if (fold.startIndex >= _lineTops.length) continue;
+        final isInsideFoldedParent = _foldRanges.any(
+          (parent) => parent.isFolded && 
+                      parent.startIndex < fold.startIndex && 
+                      parent.endIndex >= fold.startIndex
+        );
+        
+        if (isInsideFoldedParent) continue;
+        
+        final iconRect = Rect.fromLTWH(
+          _gutterWidth - (_textStyle?.fontSize ?? 15) + (_innerPadding?.left ?? 0),
+          _lineTops[fold.startIndex] + (_innerPadding?.top ?? 0) - _vscrollController.offset,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+        );
+        
+        if (iconRect.contains(event.localPosition)) {
+          _toggleFold(fold);
+          return;
+        }
+      }
+    } 
+
+    if (event is PointerMoveEvent && _dragStartOffset != null) {
+      if(isMobile) {
+        final pos = _codeContent?.tp.getPositionForOffset(padded) ?? 
+            TextPosition(offset: _controller.selection.extentOffset);
+            
+        if (_draggingCHandle) {
+          _controller.selection = TextSelection.collapsed(offset: pos.offset);
+          markNeedsPaint();
+          return;
+        }
+
+        if (_draggingStartHandle || _draggingEndHandle) {
+          final base = _controller.selection.start;
+          final extent = _controller.selection.end;
+
+           if (_draggingStartHandle) {
+            final moving = pos.offset;
+
+            _controller.selection = TextSelection(
+              baseOffset: moving,
+              extentOffset: extent,
+            );
+
+            if (moving > extent) {
+              _draggingStartHandle = false;
+              _draggingEndHandle = true;
+            }
+          } else {
+            final moving = pos.offset;
+
+            _controller.selection = TextSelection(
+              baseOffset: base,
+              extentOffset: moving,
+            );
+
+            if (moving < base) {
+              _draggingEndHandle = false;
+              _draggingStartHandle = true;
+            }
+          }
+
+          markNeedsPaint();
+          return;
+        }
+
+        if (_dragStartOffset != null) {
+          if (isMobile) {
+            if ((event.localPosition - (_pointerDownPosition ?? event.localPosition)).distance > 10) {
+              _isDragging = true;
+            }
+            if (!_selectionActive) return;
+          }
+
+          _controller.selection = TextSelection(
+            baseOffset: _dragStartOffset!,
+            extentOffset: pos.offset,
+          );
+        }
+
+        if ((event.localPosition - _pointerDownPosition!).distance > 10) {
+          _isDragging = true;
+        }
+        if(!_selectionActive) return;
+      }
+      
+      final offset = _codeContent?.tp.getPositionForOffset(padded)
+        ?? TextPosition(offset: _controller.selection.extentOffset);
+  
+      _controller.selection = TextSelection(
+        baseOffset: _dragStartOffset!,
+        extentOffset: offset.offset,
+      );
+    }
+
+    if (event is PointerUpEvent || event is PointerCancelEvent) {
+      if(!_isDragging && isMobile && !_selectionActive){
+        _controller.selection = TextSelection.collapsed(offset: offset.offset);
+      }
+      _draggingStartHandle = false;
+      _draggingEndHandle = false;
+      _draggingCHandle = false;
+      _pointerDownPosition = null;
+      _dragStartOffset = null;
+      _selectionTimer?.cancel();
+      _selectionActive = _selectionNotifier.value = false;
+      if(_readOnly) return;
+      if(isMobile && !_isDragging){
+        _commonF(_controller);
+      } else if(!isMobile){
+        _controller.refresh();
+      }
+      _isDragging = false;
+    }
+
+    super.handleEvent(event, entry);
+  }
+
+  @override
+  void performLayout() {
+    final maxW = constraints.hasBoundedWidth ? constraints.maxWidth : 1000.0;
+    _lineTops.clear();
+    _lineHeights.clear();
+
+    List<String> displayLines = _buildDisplayLinesWithAI();
+
+    final defaultStyle = _textStyle ?? _editorTheme['root'];
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+
+    double y = 0;
+    double maxLineWidth = 0;
+    
+    for (int i = 0; i < displayLines.length; i++) {
+      bool isFolded = _foldRanges.any(
+        (fold) => 
+          fold.isFolded && i > fold.startIndex && i <= fold.endIndex
+        );
+      
+      if (isFolded) {
+        _lineTops.add(y);
+        _lineHeights.add(0);
+      } else {
+        tp.text = TextSpan(text: displayLines[i], style: defaultStyle);
+        final tpWidth = _lineWrap ? maxW - (_innerPadding?.horizontal ?? 0) - _gutterWidth : double.infinity;
+        tp.layout(maxWidth: tpWidth);
+        maxLineWidth = max(maxLineWidth, tp.width);
+        _lineTops.add(y);
+        _lineHeights.add(tp.height);
+        y += tp.height;
+      }
+    }
+
+    final contentWidth = maxLineWidth + (_innerPadding?.horizontal ?? 0);
+    final contentHeight = y + (_innerPadding?.vertical ?? 0);
+
+    size = constraints.constrain(Size(contentWidth, contentHeight));
+  }
+  
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    int? bracket1, bracket2;
+    final selection = _controller.selection;
+    final cursorPosition = selection.extentOffset;
+    String text = _lines.join('\n');
+    String controllerText = _controller.text;
+
+    if (cursorPosition >= 0 && cursorPosition <= text.length) {
+      final String? before = cursorPosition > 0
+          ? text[cursorPosition - 1]
+          : null;
+      final String? after = cursorPosition < text.length
+          ? text[cursorPosition]
+          : null;
+      final int? pos = (before != null && '{}[]()'.contains(before))
+          ? cursorPosition - 1
+          : (after != null && '{}[]()'.contains(after))
+          ? cursorPosition
+          : null;
+
+      if (pos != null) {
+        final match = _findMatchingBracket(text, pos);
+        if (match != null) {
+          bracket1 = pos;
+          bracket2 = match;
+        }
+      }
+    }
+
+    final canvas = context.canvas;
+    canvas.save();
+    canvas.drawPaint(
+      Paint()
+        ..color = _editorTheme['root']!.backgroundColor ?? Colors.transparent
+        ..style = PaintingStyle.fill
+    );
+    final defaultStyle = _textStyle ?? editorTheme['root'];
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+    final gutterPainter = TextPainter(textDirection: TextDirection.ltr);
+    final foldIconPainter = TextPainter(textDirection: TextDirection.ltr);
+
+    final unfoldIcon = _gutterStyle.unfoldedIcon; 
+    final foldIcon = _gutterStyle.foldedIcon;
+
+    final viewTop = _vscrollController.offset;
+    final viewBottom = viewTop + _vscrollController.position.viewportDimension;
+  
+    final selectedColor = _selectionStyle.selectionColor;
+  
+    final firstVisibleLine = _findFirstVisibleLine(viewTop);
+    final lastVisibleLine = _findLastVisibleLine(viewBottom);
+
+    List<String> displayLines;
+    if (_inFlightEdits.isNotEmpty) {
+      displayLines = controllerText.split('\n');
+      for (final entry in _inFlightEdits.entries) {
+        if (entry.key < displayLines.length) {
+          displayLines[entry.key] = entry.value;
+        }
+      }
+    } else {
+      displayLines = _buildDisplayLinesWithAI();
+    }
+
+    int aiStart = -1, aiEnd = -1;
+    if (_aiResponse != null && _aiResponse!.isNotEmpty && _controller.selection.isValid) {
+      aiStart = _controller.selection.extentOffset;
+      aiEnd = aiStart + _aiResponse!.length;
+      _controller.isShowingAiSuggestion = true;
+    }
+
+    final Set<int> unmatchedBrackets = _findUnmatchedBrackets(text).where((index) {
+      final char = text[index];
+      return '{}[]()'.contains(char);
+    }).toSet();
+
+    if (displayLines.isNotEmpty && _lineTops.isNotEmpty) {
+      int spanOffset = 0;
+      for (int i = 0; i < displayLines.length; i++) {
+        final displayText = displayLines[i];
+        final lineLength = displayText.length;
+        final lineStart = spanOffset;
+        final lineEnd = spanOffset + lineLength;
+        
+        if (i >= _lineTops.length ||
+            i < firstVisibleLine ||
+            i > lastVisibleLine ||
+            _foldRanges.any(
+              (item)=> item.startIndex < i && item.endIndex >= i && item.isFolded
+            )
+        ) {
+          spanOffset += lineLength + 1;
+          continue;
+        }
+        
+        final contentTop = _lineTops[i];
+
+        late List<InlineSpan> lineSpans;
+
+        if (aiStart >= 0 && aiEnd > aiStart && lineEnd > aiStart && lineStart < aiEnd) {
+          final aiLineStart = max(aiStart, lineStart) - lineStart;
+          final aiLineEnd = min(aiEnd, lineEnd) - lineStart;
+          final beforeAI = displayText.substring(0, aiLineStart);
+          final aiText = displayText.substring(aiLineStart, aiLineEnd);
+          final afterAI = displayText.substring(aiLineEnd);
+
+          final beforeSpans = _convert(
+            highlight.parse(beforeAI, language: _langId).nodes ?? [],
+            lineStart,
+          );
+          final aiSpans = TextSpan(
+            text: aiText,
+            style: defaultStyle?.copyWith(
+              color: Colors.grey[400],
+              fontStyle: FontStyle.italic
+            )
+          );
+          final afterSpans = _convert(
+            highlight.parse(afterAI, language: _langId).nodes ?? [],
+            lineStart + aiLineEnd,
+          );
+
+          lineSpans = [
+            ...beforeSpans,
+            aiSpans,
+            ...afterSpans,
+          ];
+        } else {
+          if (_cachedSpans[i] != null && _cachedSpans[i]!.isNotEmpty && !_inFlightEdits.containsKey(i)) {
+            lineSpans = _cachedSpans[i]!;
+          } else {
+            final nodes = highlight.parse(displayText, language: _langId).nodes ?? [];
+            lineSpans = _convert(nodes, lineStart);
+            if (!_inFlightEdits.containsKey(i)) _cachedSpans[i] = lineSpans;
+          }
+        }
+
+        final Set<int> unmatchedQuotes = _findUnmatchedQuotesInLine(displayText, lineStart);
+        final Set<int> allUnmatched = {...unmatchedBrackets, ...unmatchedQuotes};
+
+        lineSpans = _applyBracketHighlight(
+          lineSpans,
+          lineStart,
+          bracket1,
+          bracket2,
+          allUnmatched
+        );
+
+        lineSpans = _applyDiagnosticsStyling(lineSpans, i, lineStart);
+
+        if (!_inFlightEdits.containsKey(i) && selection.start < lineEnd && selection.end > lineStart) {
+          final selStart = selection.start.clamp(lineStart, lineEnd);
+          final selEnd = selection.end.clamp(lineStart, lineEnd);
+          lineSpans = _applySelectionToSpans(
+            lineSpans,
+            lineStart,
+            selStart,
+            selEnd,
+            selectedColor,
+          );
+        }
+
+        tp.text = TextSpan(
+          style: defaultStyle?.merge(
+            _foldRanges.any((fold) => fold.isFolded && fold.startIndex == i)
+              ? TextStyle(backgroundColor: _editorTheme['root']?.color?.withAlpha(50))
+              : null
+          ),
+          children: [
+            ...lineSpans,
+            if (_foldRanges.any((fold) => fold.isFolded && fold.startIndex == i))
+            TextSpan(text: ' ...', style: defaultStyle),
+          ]
+        );
+        final tpWidth = _lineWrap ? size.width - (_innerPadding?.horizontal ?? 0) : double.infinity;
+        tp.layout(maxWidth: tpWidth);
+        tp.paint(
+          canvas,
+          offset + Offset(
+            (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+              + _gutterWidth - (_lineWrap ? 0 : _hscrollController.offset)
+              ,
+            (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+              + contentTop
+              - _vscrollController.offset,
+          ),
+        );
+
+        spanOffset += lineLength + 1;
+      }
+      
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, _gutterWidth, viewBottom),
+        Paint()
+        ..style = PaintingStyle.fill
+        ..color = _gutterStyle.backgroundColor ??
+          _editorTheme['root']!.backgroundColor ??
+          Colors.transparent
+      );
+
+      if(_enableGutterDivider) {
+        canvas.drawRect(
+          Rect.fromLTWH(_gutterWidth, 0, 0.2, viewBottom),
+          Paint()
+            ..style = PaintingStyle.fill
+            ..color = _editorTheme['root']!.color!
+        );
+      }
+
+      for(int i=0; i<displayLines.length; i++){
+        if (
+          i >= _lineTops.length ||
+          i < firstVisibleLine ||
+          i > lastVisibleLine ||
+          _foldRanges.any(
+            (item)=> item.startIndex < i && item.endIndex >= i && item.isFolded
+          )
+        ) {
+          continue;
+        }
+
+        final contentTop = _lineTops[i];
+        gutterPainter.text = TextSpan(
+          text: (i + 1).toString(),
+          style: _gutterStyle.lineNumberStyle ?? defaultStyle
+        );
+
+        gutterPainter.textAlign = TextAlign.center;
+        gutterPainter.layout();
+        _gutterWidth = max(_gutterWidth, gutterPainter.width);
+
+        gutterPainter.paint(
+          canvas,
+          Offset(
+            offset.dx +  (_gutterWidth - gutterPainter.width) / 2,
+            offset.dy
+              + (_innerPadding?.vertical ?? 0)
+              + contentTop
+              - _vscrollController.offset
+          ),
+        );
+        
+        if(_foldRanges.isNotEmpty && _foldRanges.any((item)=> item.startIndex == i)){
+          final bool isInsideFoldedParent = _foldRanges.any(
+            (parent) => parent.isFolded && parent.startIndex < i && parent.endIndex >= i
+          );
+
+          if (!isInsideFoldedParent) {
+            final currentFolditem = _foldRanges.firstWhere((item) => item.startIndex == i);
+            final icon = currentFolditem.isFolded ? foldIcon : unfoldIcon;
+            foldIconPainter.text = TextSpan(
+              text: String.fromCharCode(icon.codePoint),
+              style: TextStyle(
+                color: (
+                  currentFolditem.isFolded ?
+                    _gutterStyle.foldedIconColor : _gutterStyle.unfoldedIconColor
+                ) ?? _editorTheme['root']?.color,
+                fontSize: (_textStyle?.fontSize ?? 15) + 2,
+                fontFamily: icon.fontFamily,
+                package: icon.fontPackage
+              )
+            );
+            
+            foldIconPainter.layout(maxWidth: _textStyle?.fontSize ?? 15);
+            foldIconPainter.paint(
+              canvas,
+              Offset(
+                _gutterWidth - foldIconPainter.width + (_innerPadding?.left ?? 0),
+                offset.dy + contentTop + (_innerPadding?.top ?? 0) - _vscrollController.offset + 1
+              )
+            );
+          }
+        }
+ 
+      }
+
+      canvas.save();
+      canvas.clipRect(Rect.fromLTWH(_gutterWidth, 0, size.width - _gutterWidth, size.height));
+
+      canvas.restore();
+
+      List<int> lineStarts = [];
+      int p = 0;
+      for (final l in displayLines) {
+        lineStarts.add(p);
+        p += l.length + 1;
+      }
+
+      List<_Pair> pairsToDraw = [];
+      for (final pr in _cachedBracketPairs) {
+        final openInfo = _indexToLineCol(pr.a, lineStarts, displayLines);
+        final closeInfo = _indexToLineCol(pr.b, lineStarts, displayLines);
+        final oLine = openInfo['line']!;
+        final cLine = closeInfo['line']!;
+        if (oLine != cLine && cLine >= firstVisibleLine && oLine <= lastVisibleLine) {
+          pairsToDraw.add(pr);
+        }
+      }
+
+      final double maxLinePainterWidth = _lineWrap ? size.width - (_innerPadding?.horizontal ?? 0) : double.infinity;
+
+      for (final pair in pairsToDraw) {
+        final open = _indexToLineCol(pair.a, lineStarts, displayLines);
+        final close = _indexToLineCol(pair.b, lineStarts, displayLines);
+        final int openLine = open['line']!;
+        final int closeLine = close['line']!;
+        if (openLine == closeLine) continue;
+
+        final bool isSelected = 
+          (bracket1 == pair.a && bracket2 == pair.b) ||
+          (bracket1 == pair.b && bracket2 == pair.a);
+
+        final Paint guidePaint = Paint()
+          ..color = isSelected
+              ? (_editorTheme['root']?.color ?? _textStyle?.color ?? Colors.grey)
+              : (_editorTheme['root']?.color ?? _textStyle?.color ?? Colors.grey).withAlpha(150)
+          ..strokeWidth = isSelected ? 0.7 : 0.3
+          ..style = PaintingStyle.stroke;
+
+        final String openLineText = displayLines[openLine];
+        final int openLeading = RegExp(r'^(\s*)').firstMatch(openLineText)?.group(0)?.length ?? 0;
+        List<InlineSpan> baseSpans;
+        if (_cachedSpans[openLine] != null && _cachedSpans[openLine]!.isNotEmpty) {
+          baseSpans = _cachedSpans[openLine]!;
+        } else {
+          final nodesForLine = highlight.parse(displayLines[openLine], language: _langId).nodes ?? [];
+          baseSpans = _convert(nodesForLine, lineStarts[openLine]);
+          _cachedSpans[openLine] = baseSpans;
+        }
+
+        final tpLine = _getLinePainter(openLine, baseSpans, maxLinePainterWidth, defaultStyle ?? TextStyle());
+
+        final dxLocal = tpLine.getOffsetForCaret(
+          TextPosition(offset: openLeading),
+          Rect.zero
+        ).dx;
+
+        final double guideX = offset.dx
+            + _gutterWidth
+            + (_innerPadding?.left ?? 0)
+            + dxLocal
+            - (_lineWrap ? 0 : _hscrollController.offset);
+
+        final double yTop = offset.dy
+          + (_innerPadding?.top ?? 0) 
+          + _lineTops[openLine + 1]
+          - _vscrollController.offset;
+        final double yBottom = offset.dy
+          + (_innerPadding?.top ?? 0)
+          + _lineTops[closeLine - 1]
+          + _lineHeights[closeLine]
+          - _vscrollController.offset;
+
+        if (guideX < _gutterWidth || guideX > size.width) continue;
+
+        final double fromY = yTop.clamp(0.0, viewBottom);
+        final double toY = yBottom.clamp(0.0, viewBottom);
+
+        if(_enableGuideLines) {
+          canvas.drawLine(
+            Offset(guideX, fromY), Offset(guideX, toY),
+            guidePaint
+          );
+        }
+      }
+
+      _drawIndentationGuidelines(
+        canvas,
+        offset,
+        displayLines,
+        firstVisibleLine,
+        lastVisibleLine,
+        maxLinePainterWidth
+      );
+    }
+  
+    if (_focusNode.hasFocus) {
+      final caretX = (_innerPadding?.left ?? 0)
+        + _gutterWidth
+        + _carretOffset.dx
+        - (_lineWrap ? 0 : _hscrollController.offset);
+      final caretY = (_innerPadding?.top ?? 0)
+        + _carretOffset.dy
+        - _vscrollController.offset;
+
+      if(_showCaret){
+        canvas.drawRect(
+          Rect.fromLTWH(
+            caretX,
+            caretY,
+            1.5,
+            _caretHeight
+          ),
+          _caretPainter,
+        );
+      }
+      
+      if(isMobile){
+        final Paint bubblePainter = Paint()
+        ..color = _selectionStyle.cursorBubbleColor
+        ..style = PaintingStyle.fill;
+
+        if(selection.end > selection.start){
+          final tpFull = TextPainter(
+            text: TextSpan(
+              text: _controller.text,
+              style: _textStyle,
+            ),
+            textDirection: TextDirection.ltr,
+          );
+          tpFull.layout();
+
+          final startCaret = tpFull.getOffsetForCaret(
+            TextPosition(offset: selection.start),
+            Rect.zero,
+          );
+          final endCaret = tpFull.getOffsetForCaret(
+            TextPosition(offset: selection.end),
+            Rect.zero,
+          );
+
+          final startCaretX = (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+            + startCaret.dx
+            + _gutterWidth
+            - (_lineWrap ? 0 : _hscrollController.offset);
+          final startCaretY = (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+            + startCaret.dy
+            - _vscrollController.offset;
+
+          final endCaretX = (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+            + endCaret.dx
+            + _gutterWidth
+            - (_lineWrap ? 0 : _hscrollController.offset);
+          final endCaretY = (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+            + endCaret.dy
+            - _vscrollController.offset;
+
+          canvas.drawRect(
+            Rect.fromLTWH(
+              startCaretX,
+              startCaretY,
+              1.5,
+              _caretHeight
+            ),
+            _caretPainter,
+          );
+          
+          _startHandleRect = Rect.fromLTWH(
+              startCaretX - _caretHeight,
+              startCaretY + _caretHeight,
+              _caretHeight,
+              _caretHeight,
+            );
+          
+          _endHandleRect = Rect.fromLTWH(
+              endCaretX,
+              endCaretY + _caretHeight,
+              _caretHeight,
+              _caretHeight,
+            );
+
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              _startHandleRect!,
+              topLeft: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25)
+            ),
+            bubblePainter,
+          );
+
+          canvas.drawRect(
+            Rect.fromLTWH(
+              endCaretX,
+              endCaretY,
+              1.5,
+              _caretHeight,
+            ),
+            _caretPainter,
+          );
+
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              _endHandleRect!,
+              topRight: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25)
+            ),
+            bubblePainter,
+          );
+
+          canvas.restore();
+        } else if(_showBubble) {
+          final handleSize = _caretHeight;
+          final handleCenterX = caretX;
+          final handleCenterY = caretY + _caretHeight;
+        
+          _normalHandle = Rect.fromLTWH(
+            handleCenterX,
+            handleCenterY,
+            handleSize,
+            handleSize,
+          );
+
+          canvas.save();
+          canvas.translate(handleCenterX, handleCenterY);
+          canvas.rotate(pi / 4);
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              Rect.fromCenter(center: Offset(_caretHeight / 2, _caretHeight / 2), width: handleSize, height: handleSize),
+              topRight: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25),
+            ),
+            bubblePainter,
+          );
+          canvas.restore();
+
+          if (_draggingCHandle) {
+            final caretLineIndex = _controller.selection.base.offset == -1
+                ? 0
+                : _controller.text.substring(0, _controller.selection.base.offset).split('\n').length - 1;
+            final lines = _controller.text.split('\n');
+            final lineText = (caretLineIndex >= 0 && caretLineIndex < lines.length)
+                ? lines[caretLineIndex]
+                : '';
+          
+            final caretInLine = _controller.selection.base.offset -
+                (caretLineIndex > 0 ? lines.take(caretLineIndex).map((l) => l.length + 1).reduce((a, b) => a + b) : 0);
+            final previewStart = caretInLine.clamp(0, lineText.length);
+            final previewEnd = (caretInLine + 10).clamp(0, lineText.length);
+            final previewText = lineText.substring(
+              max(0, previewStart - 10),
+              min(lineText.length, previewEnd),
+            );
+          
+            final zoomPainter = TextPainter(
+              text: TextSpan(
+                children: _convert(highlight.parse(
+                  previewText,
+                  language: _langId
+                ).nodes ?? []),
+                style: (_textStyle ?? _editorTheme['root'])?.copyWith(
+                  fontSize: (_textStyle?.fontSize ?? 14) * 1.5,
+                  backgroundColor: _editorTheme['root']?.backgroundColor ?? Colors.transparent
+                )
+              ),
+              textDirection: TextDirection.ltr,
+            );
+            zoomPainter.layout(maxWidth: size.width * 0.6);
+          
+            final zoomBoxWidth = zoomPainter.width + 16;
+            final zoomBoxHeight = zoomPainter.height + 12;
+            final zoomBoxX = caretX - zoomBoxWidth / 2;
+            final zoomBoxY = caretY - zoomBoxHeight - 18;
+          
+            final rrect = RRect.fromRectAndRadius(
+              Rect.fromLTWH(zoomBoxX, zoomBoxY, zoomBoxWidth, zoomBoxHeight),
+              Radius.circular(12),
+            );
+            
+            canvas.drawRRect(
+              rrect,
+              Paint()
+                ..color = _editorTheme['root']?.backgroundColor ?? Colors.transparent
+                ..style = PaintingStyle.fill
+            );
+
+            canvas.drawRRect(
+              rrect,
+              Paint()
+                ..color = _editorTheme['root']?.color ?? Colors.grey
+                ..style = PaintingStyle.stroke
+            );
+           
+            zoomPainter.paint(
+              canvas,
+              Offset(zoomBoxX + 8, zoomBoxY + 6),
+            );
+          }
+        }
+      }
+    }
+    canvas.restore();
+  }
+  
+  @override
+  void describeSemanticsConfiguration(SemanticsConfiguration config) {
+    super.describeSemanticsConfiguration(config);
+  }
+
+  void _ensureCaretVisible() {
+    final caretX = _carretOffset.dx + _gutterWidth + (_innerPadding?.horizontal ?? 0);
+    final caretY = _carretOffset.dy + (_innerPadding?.vertical ?? 0);
+    final vScrollOffset = _vscrollController.offset;
+    final hScrollOffset = _hscrollController.offset;
+    final viewportHeight = _vscrollController.position.viewportDimension;
+    final viewportWidth = _hscrollController.position.viewportDimension;
+
+    if (caretY > 0 && caretY <= vScrollOffset + (_innerPadding?.vertical ?? 0)) {
+      _vscrollController.animateTo(
+        caretY - (_innerPadding?.vertical ?? 0),
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    } else if (caretY + _caretHeight >= vScrollOffset + viewportHeight) {
+      _vscrollController.animateTo(
+        caretY + _caretHeight - viewportHeight + (_innerPadding?.vertical ?? 0),
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    }
+
+    if (caretX < hScrollOffset + (_innerPadding?.horizontal ?? 0) + _gutterWidth) {
+      _hscrollController.animateTo(
+        caretX - (_innerPadding?.horizontal ?? 0) - _gutterWidth,
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    } else if (caretX + 1.5 > hScrollOffset + viewportWidth) {
+      _hscrollController.animateTo(
+        caretX + 1.5 - viewportWidth + (_innerPadding?.horizontal ?? 0) + _gutterWidth,
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+  
+  @override
+  MouseCursor get cursor {
+    final localPosition = _currerntPosition;
+    if (localPosition.dx >= 0 && localPosition.dx < _gutterWidth) {
+      for(final fold in _foldRanges){
+        final iconRect = Rect.fromLTWH(
+          _gutterWidth - (_textStyle?.fontSize ?? 15) + (_innerPadding?.left ?? 0),
+          _lineTops[fold.startIndex] + (_innerPadding?.top ?? 0) - _vscrollController.offset,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+        );
+        if(iconRect.contains(_currerntPosition)){
+          return SystemMouseCursors.click;
+        }
+      }
+      return MouseCursor.defer;
+    }
+    return SystemMouseCursors.text;
+  }
+  
+  @override
+  PointerEnterEventListener? get onEnter => (event){};
+  
+  @override
+  PointerExitEventListener? get onExit => (event){};
+  
+  @override
+  bool get validForMouseTracker => true;
+}
+
+class _BackspaceNotifier extends ChangeNotifier {
+  int? _lineIndex;
+  String _lineText = '';
+  int? _caretInLine;
+  Offset? _caretOffset;
+
+  void setEdit({required int lineIndex, required String lineText, required int caretInLine, Offset? caretOffset}) {
+    _lineIndex = lineIndex;
+    _lineText = lineText;
+    _caretInLine = caretInLine;
+    _caretOffset = caretOffset;
+    
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(const Duration(milliseconds: 16), () {
+      notifyListeners();
+    });
+  }
+
+  void clear() {
+    _lineIndex = null;
+    _lineText = '';
+    _caretInLine = null;
+    _caretOffset = null;
+    _debounceTimer?.cancel();
+    notifyListeners();
+  }
+
+  Timer? _debounceTimer;
+
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    super.dispose();
+  }
+
+  int? get lineIndex => _lineIndex;
+  String get lineText => _lineText;
+  int? get caretInLine => _caretInLine;
+  Offset? get caretOffset => _caretOffset;
+}
+
+class _Pair { final int a, b; _Pair(this.a, this.b); }
+
+class FoldRange {
+  final int startIndex, endIndex;
+  bool isFolded = false;
+  List<FoldRange> originallyFoldedChildren = [];
+
+  FoldRange(this.startIndex, this.endIndex);
+  
+  void addOriginallyFoldedChild(FoldRange child) {
+    if (!originallyFoldedChildren.contains(child)) {
+      originallyFoldedChildren.add(child);
+    }
+  }
+  
+  void clearOriginallyFoldedChildren() {
+    originallyFoldedChildren.clear();
+  }
+  
+  bool containsLine(int line) {
+    return line > startIndex && line <= endIndex;
+  }
+}
+import 'dart:async';
+import 'dart:io';
+import 'dart:math';
+
+import 'code_content.dart';
+import 'scoll.dart';
+import 'controller.dart';
+import 'styling.dart';
+import '../LSP/lsp.dart';
+import '../AI_completion/ai.dart';
+
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:highlight/highlight.dart';
+import 'package:highlight/languages/python.dart';
+import 'package:flutter_highlight/themes/atom-one-dark.dart';
+import 'package:markdown_widget/config/configs.dart';
+import 'package:markdown_widget/widget/all.dart';
+
+part 'shortcuts.dart';
+
+//FIXME: Backspace issue in mobile
+//TODO: Dynamic height for hover bo
+//TODO: set undo stack start index to 1
+//TODO: Preserve text in a bugger
+
+class CodeForge extends StatefulWidget{
+  final CodeForgeController? controller;
+  final Map<String, TextStyle>? editorTheme;
+  final Mode? language;
+  final FocusNode? focusNode;
+  final TextStyle? textStyle;
+  final AiCompletion? aiCompletion;
+  final LspConfig? lspConfig;
+  final EdgeInsets? innerPadding;
+  final ScrollController? verticalScrollController;
+  final ScrollController? horizontalScrollController;
+  final UndoHistoryController? undoHistoryController;
+  final CodeSelectionStyle? selectionStyle;
+  final GutterStyle? gutterStyle;
+  final SuggestionStyle? suggestionStyle;
+  final HoverDetailsStyle? hoverDetailsStyle;
+  final String? filePath;
+  final String? initialText;
+  final bool readOnly;
+  final bool lineWrap;
+  final bool autoFocus;
+  final bool enableFolding;
+  final bool enableGuideLines;
+  final bool enableSuggestions;
+  final bool enableGutterDivider;
+
+  const CodeForge({
+    super.key,
+    this.controller,
+    this.editorTheme,
+    this.language,
+    this.aiCompletion,
+    this.lspConfig,
+    this.filePath,
+    this.initialText,
+    this.focusNode,
+    this.verticalScrollController,
+    this.horizontalScrollController,
+    this.undoHistoryController,
+    this.textStyle,
+    this.innerPadding,
+    this.readOnly = false,
+    this.autoFocus = false,
+    this.lineWrap = false,
+    this.enableFolding = true,
+    this.enableGuideLines = true,
+    this.enableSuggestions = true,
+    this.enableGutterDivider = false,
+    this.selectionStyle,
+    this.gutterStyle,
+    this.suggestionStyle,
+    this.hoverDetailsStyle
+  });
+
+  @override
+  State<CodeForge> createState() => _CodeForgeState();
+}
+
+class _CodeForgeState extends State<CodeForge> {
+  late final ScrollController _vscrollController, _hscrollController;
+  late final CodeForgeController _controller;
+  late final UndoHistoryController _undoController;
+  late final FocusNode _focusNode;
+  late final Map<String, TextStyle> _editorTheme;
+  late final ValueNotifier<CodeContent> _contentNotifier;
+  late final ValueNotifier<bool> _selectionNotifier;
+  late final ValueNotifier<Offset> _offsetNotifier;
+  late final CodeContent _content;
+  late final Mode _language;
+  late final CodeSelectionStyle _selectionStyle;
+  late final GutterStyle _gutterStyle;
+  late final SuggestionStyle _suggestionStyle;
+  late final HoverDetailsStyle _hoverDetailsStyle;
+  final _isMobile = Platform.isAndroid || Platform.isIOS;
+  final _suggScrollController = ScrollController();
+  final _backspaceNotifier = _BackspaceNotifier();
+  final Map<int, String> _heldLineEdits = {}, _originalLineStates = {};
+  final Map<String, String> _cachedResponse = {};
+  final ValueNotifier<String?> _aiNotifier = ValueNotifier(null);
+  final ValueNotifier<Offset?> _aiOffsetNotifier = ValueNotifier(null);
+  final ValueNotifier<List<dynamic>?> _suggestionNotifier = ValueNotifier(null);
+  final ValueNotifier<List<dynamic>?> _hoverNotifier = ValueNotifier(null);
+  final ValueNotifier<List<LspErrors>> _diagnosticsNotifier = ValueNotifier([]);
+  final ValueNotifier<bool> _isHoveringPopup = ValueNotifier(false);
+  List<dynamic> _suggestions = [];
+  TextInputConnection? _connection;
+  int? _holdLocalLine, _holdLocalCaretInLine;
+  int _sugSelIndex = 0;
+  String? _holdLocalLineText;
+  Timer? _keypressTimer, _aiDebounceTimer;
+  bool _isHovered = false, _backspaceHeld = false, _isTyping = false;
+  bool _deleteHeld = false;
+  bool _lspReady = false;
+  TextEditingValue? _previousValue;
+
+  @override
+  void initState() {
+    _controller = widget.controller ?? CodeForgeController();
+    _vscrollController = widget.verticalScrollController ?? ScrollController();
+    _hscrollController = widget.horizontalScrollController ?? ScrollController();
+    _undoController = widget.undoHistoryController ?? UndoHistoryController();
+    _editorTheme = widget.editorTheme ?? atomOneDarkTheme;
+    _selectionStyle = widget.selectionStyle ?? CodeSelectionStyle();
+    _gutterStyle = widget.gutterStyle ?? GutterStyle(
+      lineNumberStyle: widget.textStyle ?? _editorTheme['root'],
+      foldedIconColor: _editorTheme['root']?.color,
+      unfoldedIconColor: _editorTheme['root']?.color,
+      backgroundColor: _editorTheme['root']?.backgroundColor
+    );
+    _suggestionStyle = widget.suggestionStyle ?? SuggestionStyle(
+      elevation: 6,
+      textStyle: ((){
+        TextStyle style = widget.textStyle ?? _editorTheme['root']!;
+        if(style.color == null){
+          style = style.copyWith(
+            color: _editorTheme['root']!.color
+          ); 
+        } 
+        return style;
+      })(),
+      backgroundColor: _editorTheme['root']!.backgroundColor!,
+      focusColor: Colors.blueAccent.withAlpha(50),
+      hoverColor: Colors.grey.withAlpha(15),
+      splashColor: Colors.blueAccent.withAlpha(50),
+      shape: BeveledRectangleBorder(
+        side: BorderSide(
+          color: _editorTheme['root']!.color ?? Colors.grey[400]!,
+          width: 0.2,
+        ),
+      ),
+    );
+
+    _hoverDetailsStyle = widget.hoverDetailsStyle ?? HoverDetailsStyle(
+      shape: BeveledRectangleBorder(
+        side: BorderSide(
+          color: _editorTheme['root']!.color ?? Colors.grey[400]!,
+          width: 0.2,
+        ),
+      ),
+      backgroundColor: _editorTheme['root']!.backgroundColor!,
+      focusColor: Colors.blueAccent.withAlpha(50),
+      hoverColor: Colors.grey.withAlpha(15),
+      splashColor: Colors.blueAccent.withAlpha(50),
+      textStyle: ((){
+        TextStyle style = widget.textStyle ?? _editorTheme['root']!;
+        if(style.color == null){
+          style = style.copyWith(
+            color: _editorTheme['root']!.color
+          ); 
+        } 
+        return style;
+      })(),
+    );
+
+    _language = widget.language ?? python;
+    _focusNode = widget.focusNode ?? FocusNode();
+    _connection = _controller.connection;
+    _content = CodeContent(controller: _controller);
+    _contentNotifier = ValueNotifier(_content);
+    _selectionNotifier = ValueNotifier(false);
+    _offsetNotifier = ValueNotifier(Offset(-1, -1));
+    _controller.manualAiCompletion = getManualAiSuggestion;
+    _controller.readOnly = widget.readOnly;
+
+    if(widget.autoFocus) _focusNode.requestFocus();
+
+    if(widget.lspConfig != null){
+       if(widget.initialText != null){
+        throw ArgumentError(
+          'Cannot provide both filePath and initialText to CodeForge.'
+        );
+      }
+      _controller.text = File(widget.filePath!).readAsStringSync();
+
+      if ((widget.lspConfig!.filePath != widget.filePath) || widget.filePath == null) {
+        throw Exception(
+          'File path in LspConfig does not match the provided filePath in CodeCrafter.',
+        );
+      }
+      
+      (() async {
+        try {
+          if (widget.lspConfig is LspSocketConfig) {
+            await (widget.lspConfig as LspSocketConfig).connect();
+          }
+          await widget.lspConfig!.initialize();
+          await Future.delayed(const Duration(milliseconds: 300));
+          await widget.lspConfig!.openDocument();
+          setState(() {
+            _lspReady = true;
+          });
+        } catch (e) {
+          debugPrint('Error initializing LSP: e');
+        }
+      })();
+
+      widget.lspConfig!.responses.listen((data){
+        if (data['method'] == 'textDocument/publishDiagnostics') {
+          final diagnostics = data['params']['diagnostics'] as List;
+          _diagnosticsNotifier.value.clear();
+          if (diagnostics.isNotEmpty) {
+            final List<LspErrors> errors = [];
+            for (final (item as Map<String, dynamic>) in diagnostics) {
+              errors.add(
+                LspErrors(
+                  severity: (() {
+                    if (item['severity'] == 1 &&
+                        widget.lspConfig!.disableError) {
+                      return 0;
+                    }
+                    if (item['severity'] == 2 &&
+                        widget.lspConfig!.disableWarning) {
+                      return 0;
+                    }
+                    return item['severity'];
+                  })(),
+                  range: item['range'],
+                  message: item['message'],
+                ),
+              );
+            }
+            _diagnosticsNotifier.value = List.from(errors);
+          }
+        }
+      });
+    } else if(widget.initialText != null){
+      _controller.text = widget.initialText!;
+    }
+
+    _focusNode.addListener((){
+      if((_connection == null || !_connection!.attached) && !widget.readOnly){
+        _connection = TextInput.attach(
+          _controller,
+          TextInputConfiguration(
+            readOnly: widget.readOnly,
+            enableDeltaModel: !widget.readOnly,
+            inputType: TextInputType.multiline,
+            inputAction: TextInputAction.newline,
+            autocorrect: false
+        ));
+        _connection!.setEditingState(_controller.value);
+        _connection!.show();
+      }
+      _controller.refresh();
+    });
+
+    _controller.addListener((){
+      final text = _controller.text;
+      final lines = text.split('\n');
+      final line = lines.length - 1;
+      final cursorPosition = _controller.selection.extentOffset;
+      final prefix = _getCurrentWordPrefix(text, cursorPosition);
+      final character = lines.isNotEmpty ? lines.last.length : 0;
+      final currentValue = _controller.value;
+      final prevValue = _previousValue ?? currentValue;
+      _isTyping = false;
+
+      if(
+        currentValue.selection.extentOffset != prevValue.selection.extentOffset &&
+        currentValue.text == prevValue.text
+      ){
+        _suggestionNotifier.value = null;
+      } else if(_isMobile) {
+        _hoverNotifier.value = null;
+      }
+
+      
+
+      if(
+        widget.lspConfig != null && _lspReady &&
+        currentValue.text != prevValue.text
+      ){
+        (() async => await widget.lspConfig!.updateDocument(text))();
+      }
+
+      _contentNotifier.value = CodeContent(
+        controller: _controller,
+        textStyle: widget.textStyle
+      );
+      _aiDebounceTimer?.cancel();
+      
+      if(
+        widget.aiCompletion != null &&
+        _controller.selection.isValid &&
+        widget.aiCompletion!.enableCompletion
+      ){
+        
+        final text = _controller.text;
+        final cursorPosition = _controller.selection.extentOffset.clamp(0, text.length);
+        final textAfterCursor = text.substring(cursorPosition);        
+        if(cursorPosition <= 0) return;
+        bool lineEnd = textAfterCursor.isEmpty ||
+              textAfterCursor.startsWith('\n') ||
+              textAfterCursor.trim().isEmpty;
+        if(!lineEnd) return;
+        final codeToSend = "{text.substring(0, cursorPosition)}<|CURSOR|>{text.substring(cursorPosition)}";
+        if(
+          widget.aiCompletion!.completionType == CompletionType.auto ||
+          widget.aiCompletion!.completionType == CompletionType.mixed
+        ){
+          _aiDebounceTimer = Timer(
+            Duration(milliseconds: widget.aiCompletion!.debounceTime),
+            () async{
+              _aiNotifier.value = await _getCachedResponse(codeToSend);
+            }
+          );
+        }
+      }
+
+      if (currentValue.text.length == prevValue.text.length + 1 &&
+          currentValue.selection.baseOffset == prevValue.selection.baseOffset + 1
+        ) {
+        final insertedChar = currentValue.text.substring(
+          prevValue.selection.baseOffset,
+          currentValue.selection.baseOffset,
+        );
+        _isTyping =
+            insertedChar.isNotEmpty &&
+            RegExp(r'[a-zA-Z]').hasMatch(insertedChar);
+        if(
+          widget.enableSuggestions &&
+          _isTyping &&
+          prefix.isNotEmpty &&
+          _controller.selection.extentOffset > 0
+        ){
+          if(widget.lspConfig == null){
+            final regExp = RegExp(r'\b\w+\b');
+            final List<String> words = regExp
+              .allMatches(text)
+              .map((m) => m.group(0)!)
+              .toList();
+            String currentWord = '';
+            if(text.isNotEmpty){
+              final match = RegExp(r'\w+').firstMatch(text);
+              if (match != null) {
+                currentWord = match.group(0)!;
+              }
+            }
+            _suggestions.clear();
+            for(final i in words){
+              if(!_suggestions.contains(i) && i != currentWord) {
+                _suggestions.add(i);
+              }
+            }
+            if(prefix.isNotEmpty){
+              _suggestions = _suggestions
+                .where((s) => s.startsWith(prefix))
+                .toList();
+            }
+          } else if(_lspReady){
+              final lspConfig = widget.lspConfig!;
+              (() async{
+                final suggestion = await lspConfig.getCompletions(
+                  line,
+                  character
+                ); 
+                _suggestions = suggestion;
+              })();
+          }
+          _sortSuggestions(prefix);
+          final triggerChar = text[cursorPosition - 1];
+          if (!RegExp(r'[a-zA-Z]').hasMatch(triggerChar)) {
+              _suggestionNotifier.value = null;
+              return;
+          }
+          if (mounted && _suggestions.isNotEmpty) {
+            _sugSelIndex = 0;
+            _suggestionNotifier.value = _suggestions;
+          }
+        } else {
+          _suggestionNotifier.value = null; 
+        }
+      }
+      _previousValue = currentValue;
+
+    });
+    
+    WidgetsBinding.instance.addPostFrameCallback((_){
+      if(_vscrollController.hasClients) _vscrollController.jumpTo(0);
+      if(_hscrollController.hasClients) _hscrollController.jumpTo(0);
+      _controller.refresh();
+    });
+    super.initState();
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    _connection?.close();
+    _controller.dispose();
+    _contentNotifier.dispose();
+    _hscrollController.dispose();
+    _vscrollController.dispose();
+    super.dispose();
+  }
+
+  Map<String,int> _lineInfoAtGlobalOffset(int globalOffset) {
+    final lines = _controller.text.split('\n');
+    int accum = 0;
+    for (int i = 0; i < lines.length; i++) {
+      final lineLen = lines[i].length;
+      if (globalOffset >= accum && globalOffset <= accum + lineLen) {
+        return {'line': i, 'lineStart': accum, 'inLine': globalOffset - accum};
+      }
+      accum += lineLen + 1;
+    }
+    final last = max(0, lines.length - 1);
+    final lastStart = accum - (lines.isNotEmpty ? (lines.last.length + 1) : 0);
+    return {'line': last, 'lineStart': lastStart, 'inLine': lines.isNotEmpty ? lines.last.length : 0};
+  }
+  
+  void _commitHeldDeleteToController() {
+    if (!_deleteHeld) return;
+    if (_holdLocalLineText != null && _holdLocalLine != null) {
+      final currentText = _controller.text;
+      final lines = currentText.split('\n');
+      
+      if (_holdLocalLine! < lines.length) {
+        lines[_holdLocalLine!] = _holdLocalLineText!;
+        final newText = lines.join('\n');
+        final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + (_holdLocalCaretInLine ?? 0);
+        
+        _controller.value = _controller.value.copyWith(
+          text: newText,
+          selection: TextSelection.collapsed(offset: newCaret),
+        );
+      }
+    }
+    
+    _backspaceNotifier.clear();
+    _resetDeleteState();
+    _commonF(_controller);
+  }
+  
+  void _resetDeleteState() {
+    _holdLocalLine = null;
+    _holdLocalCaretInLine = null;
+    _holdLocalLineText = null;
+    _deleteHeld = false;
+    _heldLineEdits.clear();
+    _originalLineStates.clear();
+  }
+  
+  void _syncAndMoveToNextLine() {
+    final currentText = _controller.text;
+    final lines = currentText.split('\n');
+    
+    if (_holdLocalLine != null &&
+        _holdLocalLine! < lines.length - 1) {
+      final nextLineIndex = _holdLocalLine! + 1;
+      final currentLineText = _holdLocalLineText ?? lines[_holdLocalLine!];
+      final nextLineText = lines[nextLineIndex];
+  
+      final merged = currentLineText + nextLineText;
+      lines[_holdLocalLine!] = merged;
+      lines.removeAt(nextLineIndex);
+  
+      final newText = lines.join('\n');
+      final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + currentLineText.length;
+  
+      _controller.value = _controller.value.copyWith(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newCaret),
+      );
+  
+      _holdLocalLineText = merged;
+      _holdLocalCaretInLine = currentLineText.length;
+  
+      _backspaceNotifier.clear();
+      _controller.refresh();
+    }
+  }
+  
+  void _commitHeldBackspaceToController() {
+    if (!_backspaceHeld) return;
+    if (_holdLocalLineText != null && _holdLocalLine != null) {
+      final currentText = _controller.text;
+      final lines = currentText.split('\n');
+      
+      if (_holdLocalLine! < lines.length) {
+        lines[_holdLocalLine!] = _holdLocalLineText!;
+        final newText = lines.join('\n');
+        final newCaret = _lineStartGlobalOffset(_holdLocalLine!) + (_holdLocalCaretInLine ?? 0);
+        
+        _controller.value = _controller.value.copyWith(
+          text: newText,
+          selection: TextSelection.collapsed(offset: newCaret),
+        );
+      }
+    }
+    
+    _backspaceNotifier.clear();
+    _resetBackspaceState();
+    _commonF(_controller);
+  }
+
+  void _resetBackspaceState() {
+    _holdLocalLine = null;
+    _holdLocalCaretInLine = null;
+    _holdLocalLineText = null;
+    _backspaceHeld = false;
+    _deleteHeld = false;
+    _heldLineEdits.clear();
+    _originalLineStates.clear();
+  }
+
+  void _syncAndMoveToPreviousLine() {
+    final currentText = _controller.text;
+    final lines = currentText.split('\n');
+    if (_holdLocalLine != null &&
+        _holdLocalLine! > 0 &&
+        _holdLocalLine! < lines.length) {
+      final prevLineIndex = _holdLocalLine! - 1;
+      final currentLineText = _holdLocalLineText ?? lines[_holdLocalLine!];
+
+      final merged = lines[prevLineIndex] + currentLineText;
+      lines[prevLineIndex] = merged;
+      lines.removeAt(_holdLocalLine!);
+
+      final newText = lines.join('\n');
+      final newCaret = _lineStartGlobalOffset(prevLineIndex) + merged.length;
+
+      _controller.value = _controller.value.copyWith(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newCaret),
+      );
+
+      _holdLocalLine = prevLineIndex;
+      _holdLocalLineText = merged;
+      _holdLocalCaretInLine = merged.length;
+
+      _backspaceNotifier.clear();
+      _controller.refresh();
+    }
+  }
+
+  int _lineStartGlobalOffset(int lineIndex) {
+    final lines = _controller.text.split('\n');
+    int acc = 0;
+    for (int i = 0; i < lineIndex && i < lines.length; i++) {
+      acc += lines[i].length + 1;
+    }
+    return acc;
+  }
+
+  Future<String> _getCachedResponse(String codeToSend) async {
+    final String key = codeToSend.hashCode.toString();
+    if (_cachedResponse.containsKey(key)) {
+      return _cachedResponse[key]!;
+    }
+    final String aiResponse = await widget.aiCompletion!.model.completionResponse(codeToSend);
+    _cachedResponse[key] = aiResponse;
+    return aiResponse;
+  }
+
+  void _sortSuggestions(String prefix) {
+    _suggestions.sort((a, b) {
+      final aStartsWith = a is LspCompletion
+          ? a.label.toLowerCase().startsWith(prefix.toLowerCase())
+          : a.toLowerCase().startsWith(prefix.toLowerCase());
+      final bStartsWith = b is LspCompletion
+          ? b.label.toLowerCase().startsWith(prefix.toLowerCase())
+          : b.toLowerCase().startsWith(prefix.toLowerCase());
+      if (aStartsWith && !bStartsWith) return -1;
+      if (!aStartsWith && bStartsWith) return 1;
+
+      return a is LspCompletion ? b.label.compareTo(a.label) : b.compareTo(a);
+    });
+  }
+
+  Future<void> getManualAiSuggestion() async {
+    if (widget.aiCompletion?.completionType == CompletionType.manual ||
+        widget.aiCompletion?.completionType == CompletionType.mixed) {
+      final String text = _controller.text;
+      final int cursorPosition = _controller.selection.extentOffset;
+      final String codeToSend = "{text.substring(0, cursorPosition)}<|CURSOR|>{text.substring(cursorPosition)}";
+      _aiNotifier.value = await _getCachedResponse(codeToSend);
+    }
+  }
+
+  String _getCurrentWordPrefix(String text, int offset) {
+    final safeOffset = offset.clamp(0, text.length);
+    final beforeCursor = text.substring(0, safeOffset);
+    final match = RegExp(r'([a-zA-Z_][a-zA-Z0-9_]*)').firstMatch(beforeCursor);
+    return match?.group(0) ?? '';
+  }
+
+void _scrollSuggestionToIndex(int index) {
+  final itemHeight = (widget.textStyle?.fontSize ?? 14) + 6.5;
+  final scrollOffset = _suggScrollController.offset;
+  final viewHeight = 390.0;
+
+  final itemTop = index * itemHeight;
+  final itemBottom = itemTop + itemHeight;
+
+  if (itemTop < scrollOffset) {
+    _suggScrollController.animateTo(
+      itemTop,
+      duration: Duration(milliseconds: 120),
+      curve: Curves.easeInOut,
+    );
+  } else if (itemBottom > scrollOffset + viewHeight) {
+    _suggScrollController.animateTo(
+      itemBottom - viewHeight,
+      duration: Duration(milliseconds: 120),
+      curve: Curves.easeInOut,
+    );
+  }
+}
+
+  @override
+  Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final screenHeight = MediaQuery.of(context).size.height;
+    return LayoutBuilder(
+      builder: (_, constraints) {
+        return GestureDetector(
+          onTap: _focusNode.requestFocus,
+          child: CallbackShortcuts(
+            bindings: _getShortcuts(_controller, widget.readOnly),
+            child: Stack(
+              children: [
+                RawScrollbar(
+                  thumbColor: _editorTheme['root']!.color!.withAlpha(110),
+                  radius: Radius.circular(20),
+                  controller: _vscrollController,
+                  interactive: !_isMobile,
+                  thumbVisibility: _isHovered,
+                  child: RawScrollbar(
+                    thumbColor: _editorTheme['root']!.color!.withAlpha(110),
+                    radius: Radius.circular(20),
+                    controller: _hscrollController,
+                    thumbVisibility: _isHovered,
+                    interactive: !_isMobile,
+                    child: MouseRegion(
+                      onEnter: (event) => setState(() => _isHovered = true),
+                      onExit: (event) => setState(() => _isHovered = false),
+                      child: UndoHistory<TextEditingValue>(
+                        value: _controller,
+                        controller: _undoController,
+                        focusNode: _focusNode,
+                          onTriggered:(value) {
+                            _controller.value = value;
+                            _controller.refresh();
+                          },
+                        shouldChangeUndoStack: (oldValue, newValue) {
+                          if (!newValue.selection.isValid) {
+                            return false;
+                          }
+
+                          if (oldValue == null && 
+                              newValue.text.isEmpty && 
+                              newValue.selection.extentOffset <= 0) {
+                            return false;
+                          }
+                          
+                          if (oldValue != null && oldValue.text == newValue.text) {
+                            return false;
+                          }
+                
+                          return oldValue == null ||
+                            oldValue.text != newValue.text ||
+                            oldValue.composing != newValue.composing;
+                        },
+                        child: ValueListenableBuilder(
+                          valueListenable: _selectionNotifier,
+                          builder: (_, selectionValue, child) {
+                            return TwoDimensionalScrollable(
+                              verticalDetails: ScrollableDetails.vertical(
+                                controller: _vscrollController,
+                                physics: selectionValue ? NeverScrollableScrollPhysics() : ClampingScrollPhysics()
+                              ),
+                              horizontalDetails: ScrollableDetails.horizontal(
+                                controller: _hscrollController,
+                                physics: selectionValue ? NeverScrollableScrollPhysics() : ClampingScrollPhysics()
+                              ),
+                              viewportBuilder: (_, voffset, hoffset) {
+                                return CustomViewport(
+                                  verticalOffset: voffset,
+                                  horizontalOffset: hoffset,
+                                  mainAxis: Axis.vertical,
+                                  verticalAxisDirection: AxisDirection.down,
+                                  horizontalAxisDirection: AxisDirection.right,
+                                  delegate: TwoDimensionalChildBuilderDelegate(
+                                    maxXIndex: 0,
+                                    maxYIndex: 0,
+                                    builder: (_, vicinity){
+                                      return ValueListenableBuilder(
+                                        valueListenable: _contentNotifier,
+                                        builder: (_, value, child) {
+                                          final codeField = _CodeField(
+                                              context,
+                                              _editorTheme,
+                                              _language,
+                                              _controller,
+                                              _focusNode,
+                                              widget.textStyle,
+                                              widget.innerPadding,
+                                              _vscrollController,
+                                              _hscrollController,
+                                              widget.lineWrap,
+                                              widget.enableFolding,
+                                              widget.readOnly,
+                                              widget.enableGuideLines,
+                                              value,
+                                              _selectionStyle,
+                                              _gutterStyle,
+                                              _selectionNotifier,
+                                              _aiNotifier,
+                                              _aiOffsetNotifier,
+                                              _offsetNotifier,
+                                              _hoverNotifier,
+                                              _diagnosticsNotifier,
+                                              _isHoveringPopup,
+                                              _backspaceNotifier,
+                                              widget.enableGutterDivider
+                                            );
+                                          return SizedBox(
+                                            height: value.totalHeight + (widget.innerPadding?.vertical ?? 0),
+                                            width: widget.lineWrap 
+                                              ? constraints.maxWidth
+                                              : max(
+                                                  value.totalWidth + (widget.innerPadding?.horizontal ?? 0),
+                                                  constraints.maxWidth
+                                                ),
+                                            child:
+                                            KeyboardListener(
+                                              focusNode: _focusNode,
+                                              onKeyEvent: (event) {
+                                                final isShiftPressed = HardwareKeyboard.instance.isShiftPressed;
+                                                final isCtrlPressed = HardwareKeyboard.instance.isControlPressed;
+                                                if(isCtrlPressed) return;
+
+                                                if (event is KeyUpEvent) {
+                                                  if(event.logicalKey == LogicalKeyboardKey.backspace){
+                                                    _commitHeldBackspaceToController();
+                                                  } else if(event.logicalKey == LogicalKeyboardKey.delete){
+                                                    _commitHeldDeleteToController();
+                                                  }
+                                                  return;
+                                                }
+                                                
+                                                if(event is KeyDownEvent){
+                                                  if(event.logicalKey == LogicalKeyboardKey.escape){
+                                                    _suggestionNotifier.value = null;
+                                                    _aiOffsetNotifier.value = null;
+                                                    _offsetNotifier.value = Offset(-1, -1);
+                                                  }
+                                                  
+                                                  if(
+                                                    event.logicalKey == LogicalKeyboardKey.enter &&
+                                                    _controller.isShowingSuggestions &&
+                                                    !_isMobile
+                                                  ){
+                                                    final suggestion = _suggestionNotifier.value?[_sugSelIndex];
+                                                    if(suggestion != null){
+                                                      if(suggestion is String){
+                                                      _controller.insertAtCurrentCursor(suggestion, replaceTypedChar: true);
+                                                      } else if(suggestion is LspCompletion){
+                                                        _controller.insertAtCurrentCursor(suggestion.label, replaceTypedChar: true);
+                                                      }
+                                                    }
+                                                    _suggestionNotifier.value = null;  
+                                                  }
+                                                  
+                                                }
+
+                                                if(event is KeyDownEvent || event is KeyRepeatEvent){
+                                                  final currentSelection = _controller.selection;
+                                                  final currentText = _controller.text;
+                                                  switch (event.logicalKey) {
+                                                    case LogicalKeyboardKey.delete: 
+                                                      if(widget.readOnly) return;
+                                                      _suggestionNotifier.value = null;
+                                                      if(!currentSelection.isValid) return;
+                                                      if(
+                                                        (event is KeyDownEvent && 
+                                                        !currentSelection.isCollapsed) ||
+                                                        (currentText.substring(
+                                                          currentSelection.extentOffset,
+                                                          (currentSelection.extentOffset + 1).clamp(0, currentText.length))
+                                                        ) == '\n'
+                                                      ) {
+                                                        _controller.delete();
+                                                        return;
+                                                      }
+
+                                                      if (!_deleteHeld) {
+                                                        final info = _lineInfoAtGlobalOffset(currentSelection.extentOffset);
+                                                        _holdLocalLine = info['line'];
+                                                        _holdLocalCaretInLine = info['inLine'];
+                                                        final lines = currentText.split('\n');
+                                                        _holdLocalLineText = (0 <= _holdLocalLine! && _holdLocalLine! < lines.length) 
+                                                            ? lines[_holdLocalLine!] 
+                                                            : '';
+                                                        _deleteHeld = true;
+                                                        _heldLineEdits.clear();
+                                                      }
+
+                                                      if (_holdLocalLineText != null) {
+                                                        final caretIn = _holdLocalCaretInLine ?? 0;
+                                                        final lineText = _holdLocalLineText!;
+
+                                                        if (caretIn < lineText.length) {
+                                                          final before = lineText.substring(0, caretIn);
+                                                          final after = lineText.substring(caretIn + 1);
+                                                          _holdLocalLineText = before + after;
+                                                          
+                                                          Offset carretOffset = _content.caretOffset;
+                                                          final tempPainter = TextPainter(
+                                                            text: TextSpan(
+                                                              text: before,
+                                                              style: widget.textStyle ?? _editorTheme['root']
+                                                            ),
+                                                            textDirection: TextDirection.ltr
+                                                          );
+                                                          tempPainter.layout();
+                                                          carretOffset = Offset(tempPainter.width, carretOffset.dy);
+
+                                                          _backspaceNotifier.setEdit(
+                                                            lineIndex: _holdLocalLine!,
+                                                            lineText: _holdLocalLineText!,
+                                                            caretInLine: _holdLocalCaretInLine!,
+                                                            caretOffset: carretOffset
+                                                          );
+                                                        } else if (caretIn >= lineText.length) {
+                                                          final lines = _holdLocalLineText != null
+                                                            ? _holdLocalLineText!.split('\n')
+                                                            : [];
+                                                          if (_holdLocalLine != null && _holdLocalLine! < lines.length - 1) {
+                                                            _syncAndMoveToNextLine();
+                                                          }
+                                                        }
+                                                      }
+                                                      break;
+
+                                                    case LogicalKeyboardKey.backspace:
+                                                      if(widget.readOnly) return;
+                                                      _suggestionNotifier.value = null;
+                                                      if (!currentSelection.isValid) return;
+                                                      if(
+                                                        event is KeyDownEvent &&
+                                                        !currentSelection.isCollapsed
+                                                      ){
+                                                        _controller.backspace();
+                                                        _commonF(_controller);
+                                                        return;
+                                                      }
+                                                      if (!_backspaceHeld) {
+                                                        final info = _lineInfoAtGlobalOffset(currentSelection.extentOffset);
+                                                        _holdLocalLine = info['line'];
+                                                        _holdLocalCaretInLine = info['inLine'];
+                                                        final lines = currentText.split('\n');
+                                                        _holdLocalLineText = (0 <= _holdLocalLine! && _holdLocalLine! < lines.length) 
+                                                            ? lines[_holdLocalLine!] 
+                                                            : '';
+                                                        _backspaceHeld = true;
+                                                        _heldLineEdits.clear();
+                                                      }
+                        
+                                                      if (_holdLocalLineText != null) {
+                                                        final caretIn = _holdLocalCaretInLine ?? 0;
+                        
+                                                        if (caretIn > 0 && caretIn <= _holdLocalLineText!.length) {
+                                                          final before = _holdLocalLineText!.substring(0, caretIn - 1);
+                                                          final after = _holdLocalLineText!.substring(caretIn);
+                                                          _holdLocalLineText = before + after;
+                                                          _holdLocalCaretInLine = caretIn - 1;
+                                                          
+                                                          Offset carretOffset = _content.caretOffset;
+                                                          final tempPainter = TextPainter(
+                                                            text: TextSpan(
+                                                              text: before,
+                                                              style: widget.textStyle ?? _editorTheme['root']
+                                                            ),
+                                                            textDirection: TextDirection.ltr
+                                                          );
+                                                          tempPainter.layout();
+                                                          carretOffset = Offset(tempPainter.width, carretOffset.dy);
+                        
+                                                          _backspaceNotifier.setEdit(
+                                                            lineIndex: _holdLocalLine!,
+                                                            lineText: _holdLocalLineText!,
+                                                            caretInLine: _holdLocalCaretInLine!,
+                                                            caretOffset: carretOffset
+                                                          );
+                                                        } else if (caretIn == 0 && _holdLocalLine! > 0) {
+                                                          _syncAndMoveToPreviousLine();
+                                                        }
+                                                      }
+                                                      break;
+                                                    case LogicalKeyboardKey.arrowUp:
+                                                      if(isShiftPressed) break;
+                                                      if(_suggestionNotifier.value != null){
+                                                        setState(() {
+                                                          _sugSelIndex = (_sugSelIndex - 1) % (_suggestionNotifier.value?.length ?? 1);
+                                                          _scrollSuggestionToIndex(_sugSelIndex);
+                                                        });
+                                                        return;
+                                                      }
+                                                      final textBeforeCursor = currentText.substring(0, currentSelection.extentOffset);
+                                                      final lines = textBeforeCursor.split('\n');
+                                                      if (lines.length > 1) {
+                                                        final currentLineStart = currentSelection.extentOffset - lines.last.length;
+                                                        final previousLineText = lines[lines.length - 2];
+                                                        final newOffset = currentLineStart - previousLineText.length - 1;
+                                                        
+                                                        final targetPosition = min(currentSelection.extentOffset - currentLineStart, previousLineText.length);
+                                                        final newCursorPosition = newOffset + targetPosition;
+                                                        
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: newCursorPosition)
+                                                        );
+                                                      } else if (currentSelection.extentOffset > 0) {
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: 0)
+                                                        );
+                                                      }
+                                                      break;
+                                    
+                                                    case LogicalKeyboardKey.arrowDown:
+                                                      if(isShiftPressed) break;
+                                                      if(_suggestionNotifier.value != null){
+                                                        setState(() {
+                                                          _sugSelIndex = (_sugSelIndex + 1) % (_suggestionNotifier.value?.length ?? 1);
+                                                          _scrollSuggestionToIndex(_sugSelIndex);
+                                                        });
+                                                        return;
+                                                      }
+                                                      final lines = currentText.split('\n');
+                                                      int caret = currentSelection.extentOffset;
+                                                      int charCount = 0;
+                                                      int currentLine = 0;
+                                                      for (int i = 0; i < lines.length; i++) {
+                                                        if (caret <= charCount + lines[i].length) {
+                                                          currentLine = i;
+                                                          break;
+                                                        }
+                                                        charCount += lines[i].length + 1;
+                                                      }
+                                                      final currentLineStart = charCount;
+                                                      final horizontalPosition = caret - currentLineStart;
+                                                      if (currentLine < lines.length - 1) {
+                                                        final nextLineText = lines[currentLine + 1];
+                                                        final targetPosition = min(horizontalPosition, nextLineText.length);
+                                                        final newCursorPosition = currentLineStart + lines[currentLine].length + 1 + targetPosition;
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: min(newCursorPosition, currentText.length))
+                                                        );
+                                                      } else {
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(offset: currentText.length)
+                                                        );
+                                                      }
+                                                      break;
+                                    
+                                                    case LogicalKeyboardKey.arrowLeft:
+                                                      if(isShiftPressed) break;
+                                                      _suggestionNotifier.value = null;
+                                                      if(currentSelection.extentOffset > 0 && currentText.isNotEmpty){
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(
+                                                            offset: currentSelection.extentOffset - 1
+                                                          )
+                                                        );
+                                                      }
+                                                      break;
+                                                      
+                                                    case LogicalKeyboardKey.arrowRight:
+                                                      if(isShiftPressed) break;
+                                                      _suggestionNotifier.value = null;
+                                                      if(_aiNotifier.value != null){
+                                                        _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                                                        _aiNotifier.value = null;
+                                                        _aiOffsetNotifier.value = null;
+                                                        break;
+                                                      }
+                                                      if(currentText.isNotEmpty && currentSelection.extentOffset < currentText.length){
+                                                        _controller.value = _controller.value.copyWith(
+                                                          selection: TextSelection.collapsed(
+                                                            offset: currentSelection.extentOffset + 1
+                                                          )
+                                                        );
+                                                      }
+                                                      break;
+
+                                                    case LogicalKeyboardKey.tab:
+                                                      if(_aiNotifier.value != null){
+                                                        _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                                                        _aiNotifier.value = null;
+                                                        _aiOffsetNotifier.value = null;
+                                                      }
+                                                      break;
+                                                  }
+                                                }
+                                                
+                                                if(event.logicalKey != LogicalKeyboardKey.backspace){
+                                                  if(event is KeyDownEvent){
+                                                    _commonF(_controller);
+                                                  } else if(event is KeyRepeatEvent){
+                                                    _keypressTimer?.cancel();
+                                                    Timer(Duration(milliseconds: 5), ()=> _controller.refresh());
+                                                    _keypressTimer = Timer(Duration(milliseconds: 50), () {
+                                                      if(_connection == null || !_connection!.attached){
+                                                        _connection = TextInput.attach(
+                                                          _controller,
+                                                          TextInputConfiguration(
+                                                            enableDeltaModel: true,
+                                                            inputType: TextInputType.multiline,
+                                                            inputAction: TextInputAction.newline
+                                                        ));
+                                                        _connection!.show();
+                                                        _connection!.setEditingState(_controller.value);
+                                                      }
+                                                      else{
+                                                        _connection!.setEditingState(_controller.value);
+                                                      }
+                                                    });
+                                                  }
+                                                }
+                                              },
+                                              child: codeField
+                                            )
+                                          );
+                                        }
+                                      );
+                                    }
+                                  ),
+                                );
+                              }
+                            );
+                          }
+                        ),
+                      )
+                    ),
+                  ),
+                ),
+                ValueListenableBuilder<Offset?>(
+                  valueListenable: _aiOffsetNotifier,
+                  builder: (context, offvalue, child) {
+                    return _isMobile && _aiNotifier.value != null && offvalue != null && _aiNotifier.value!.isNotEmpty ? Positioned(
+                      top: offvalue.dy + (widget.textStyle?.fontSize ?? 14) * _aiNotifier.value!.split('\n').length + 15,
+                      left: offvalue.dx + (_aiNotifier.value!.split('\n')[0].length * (widget.textStyle?.fontSize ?? 14) / 2),
+                      child: Row(
+                        children: [
+                          InkWell(
+                            onTap: (){
+                              if(_aiNotifier.value == null) return;
+                              _controller.insertAtCurrentCursor(_aiNotifier.value!);
+                              _aiNotifier.value = null;
+                              _aiOffsetNotifier.value = null;
+                            },
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: _editorTheme['root']?.backgroundColor,
+                                borderRadius: BorderRadius.all(Radius.circular(8)),
+                                border: BoxBorder.all(
+                                  width: 1.5,
+                                  color: Color(0xff64b5f6)
+                                )
+                              ),
+                              child: Icon(
+                                Icons.check,
+                                color: _editorTheme['root']?.color,
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            width: 30,
+                          ),
+                          InkWell(
+                            onTap: () {
+                              _aiNotifier.value = null;
+                              _aiOffsetNotifier.value = null;
+                            },
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: _editorTheme['root']?.backgroundColor,
+                                borderRadius: BorderRadius.all(Radius.circular(8)),
+                                border: BoxBorder.all(
+                                  width: 1.5,
+                                  color: Colors.red
+                                )
+                              ),
+                              child: Icon(
+                                Icons.close,
+                                color: _editorTheme['root']?.color,
+                              ),
+                            )
+                          )
+                        ],
+                      ),
+                    ) : SizedBox.shrink();
+                  }
+                ),
+                ValueListenableBuilder<Offset>(
+                  valueListenable: _offsetNotifier,
+                  builder: (_, pos, child){
+                    final toolbarStyle = TextStyle(color: Colors.grey[400]);
+                    final shortCutStyle = TextStyle(color: Colors.grey[600]);
+                    void copy() async {
+                      final selection = _controller.selection;
+                      final text = _controller.text;
+                      if (selection.isValid && !selection.isCollapsed) {
+                        final selectedText = text.substring(
+                          selection.start,
+                          selection.end,
+                        );
+                        Clipboard.setData(ClipboardData(text: selectedText));
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void paste() async{
+                      if(widget.readOnly) return;
+                      final data = await Clipboard.getData('text/plain');
+                      final pasteText = data?.text ?? '';
+                      if (pasteText.isNotEmpty) {
+                        final selection = _controller.selection;
+                        final text = _controller.text;
+                        final before = text.substring(0, selection.start);
+                        final after = text.substring(selection.end);
+                        final newText = before + pasteText + after;
+                        final newOffset = before.length + pasteText.length;
+                        _controller.value = _controller.value.copyWith(
+                          text: newText,
+                          selection: TextSelection.collapsed(offset: newOffset),
+                        );
+                        _commonF(_controller);
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void cut(){
+                      if(widget.readOnly) return;
+                      final selection = _controller.selection;
+                      final text = _controller.text;
+                      if (selection.isValid && !selection.isCollapsed) {
+                        final selectedText = text.substring(selection.start, selection.end);
+                        Clipboard.setData(ClipboardData(text: selectedText));
+                        final before = text.substring(0, selection.start);
+                        final after = text.substring(selection.end);
+                        final newText = before + after;
+                        _controller.value = _controller.value.copyWith(
+                          text: newText,
+                          selection: TextSelection.collapsed(offset: before.length),
+                        );
+                      }
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    void selectAll(){
+                      _controller.value = _controller.value.copyWith(
+                        selection: TextSelection(
+                          baseOffset: 0,
+                          extentOffset: _controller.text.length
+                        ),
+                      );
+                      _offsetNotifier.value = Offset(-1, -1);
+                    }
+
+                    return pos.dx < 0 || pos.dy < 0 ? SizedBox.shrink() : _isMobile ? TextSelectionToolbar(
+                      anchorAbove: pos,
+                      anchorBelow: pos,
+                      children: [
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(left: 10),
+                          onPressed: copy,
+                          child: Text("Copy"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(left: 10),
+                          onPressed: paste,
+                          child: Text("Paste"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.zero,
+                          onPressed: cut,
+                          child: Text("Cut"),
+                        ),
+                        TextSelectionToolbarTextButton(
+                          padding: EdgeInsets.only(right: 10),
+                          onPressed: selectAll,
+                          child: Text("SelectAll"),
+                        ),
+                      ]
+                    ) : Positioned(
+                      top: pos.dy,
+                      left: pos.dx,
+                      width: 200,
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: [
+                          Card(
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadiusGeometry.circular(5),
+                              side: BorderSide(
+                                color: _editorTheme['root']!.color ?? Colors.grey,
+                                width: 0.2
+                              )
+                            ),
+                            color: Color(0xff202020),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                ListTile(
+                                  dense: true,
+                                  onTap: copy,
+                                  title: Text("Copy"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + C"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                  shape: BeveledRectangleBorder(
+                                    borderRadius: BorderRadiusGeometry.vertical(
+                                      top: Radius.circular(3)
+                                    )
+                                  ),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: paste,
+                                  title: Text("Paste"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + V"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: cut,
+                                  title: Text("Cut"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + X"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                ),
+                                ListTile(
+                                  dense: true,
+                                  onTap: selectAll,
+                                  title: Text("SelectAll"),
+                                  titleTextStyle: toolbarStyle,
+                                  leadingAndTrailingTextStyle: shortCutStyle,
+                                  trailing: Text("Ctrl + A"),
+                                  hoverColor: _editorTheme['root']!.color!.withAlpha(50),
+                                  shape: BeveledRectangleBorder(
+                                    borderRadius: BorderRadiusGeometry.vertical(
+                                      bottom: Radius.circular(3)
+                                    )
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+                ),
+                ValueListenableBuilder(
+                  valueListenable: _suggestionNotifier,
+                  builder: (_, sugg, child){
+                    if(sugg == null) {
+                      _sugSelIndex = 0;
+                      _controller.isShowingSuggestions = false;
+                      return SizedBox.shrink();
+                    }
+                    _controller.isShowingSuggestions = true;
+                    return Positioned(
+                      width: screenWidth < 700 ? screenWidth * 0.63 : screenWidth * 0.3,
+                      top: _contentNotifier.value.caretOffset.dy + (widget.textStyle?.fontSize ?? 14) + 10,
+                      left: _contentNotifier.value.caretOffset.dx + 50,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: 400,
+                          maxWidth: 400,
+                          minWidth: 70
+                        ),
+                        child: Card(
+                          shape: _suggestionStyle.shape,
+                          elevation: _suggestionStyle.elevation,
+                          color: _suggestionStyle.backgroundColor,
+                          margin: EdgeInsets.zero,
+                          child: RawScrollbar(
+                            thumbVisibility: true,
+                            thumbColor: _editorTheme['root']!.color!.withAlpha(80),
+                            controller: _suggScrollController,
+                            child: ListView.builder(
+                              itemExtent: (widget.textStyle?.fontSize ?? 14) + 6.5,
+                              controller: _suggScrollController,
+                              padding: EdgeInsets.all(6),
+                              shrinkWrap: true,
+                              itemCount: sugg.length,
+                              itemBuilder: (_, indx){
+                                final item = sugg[indx];
+                                return Container(
+                                  color: _sugSelIndex == indx ? Color(0xff024281) : Colors.transparent,
+                                  child: InkWell(
+                                    canRequestFocus: false,
+                                    hoverColor: _suggestionStyle.hoverColor,
+                                    focusColor: _suggestionStyle.focusColor,
+                                    splashColor: _suggestionStyle.splashColor,
+                                    onTap: () => setState(() {
+                                      _sugSelIndex = indx;
+                                      final text = item is LspCompletion ? item.label : item as String;
+                                      _controller.insertAtCurrentCursor(text, replaceTypedChar: true);
+                                      _suggestionNotifier.value = null;
+                                    }),
+                                    child: Row(
+                                      children: [
+                                        if(item is LspCompletion) ...[
+                                          item.icon,
+                                          const SizedBox(width: 10),
+                                          Text(
+                                            item.label,
+                                            style: _suggestionStyle.textStyle
+                                          )
+                                        ],
+                                        if(item is String) Text(
+                                          item,
+                                          style: _suggestionStyle.textStyle
+                                        )
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          )
+                        ),
+                      ),
+                    );
+                  }
+                ),
+                ValueListenableBuilder(
+                  valueListenable: _hoverNotifier,
+                  builder: (_, hov, c){
+                    if(hov == null || widget.lspConfig == null) return SizedBox.shrink();
+                    final Offset position = hov[0];
+                    final Map<String, int> lineChar = hov[1];
+                    final hoverScrollController = ScrollController();
+                    final width = _isMobile ? screenWidth * 0.63 : screenWidth * 0.3;
+                    final height = _isMobile ? screenHeight * 0.4 : 550.0;
+                    return Positioned(
+                      width: width,
+                      height: height,
+                      top: (screenHeight - position.dy) < 550 ? position.dy - height : position.dy,
+                      left: (screenWidth - position.dx) < width ? position.dx - width : position.dx,
+                      child: MouseRegion(
+                        onEnter: (_) => _isHoveringPopup.value = true,
+                        onExit: (_) => _isHoveringPopup.value = false,
+                        child: Card(
+                          color: _hoverDetailsStyle.backgroundColor,
+                          shape: _hoverDetailsStyle.shape,
+                          child: FutureBuilder<String>(
+                              future: (() async{
+                                final lspConfig = widget.lspConfig;
+                                final line = lineChar['line']!;
+                                final character = lineChar['character']!;
+                                final diagnostic = _diagnosticsNotifier.value.firstWhere(
+                                  (diag) {
+                                    final diagStartLine = diag.range['start']['line'] as int;
+                                    final diagEndLine = diag.range['end']['line'] as int;
+                                    final diagStartChar = diag.range['start']['character'] as int;
+                                    final diagEndChar = diag.range['end']['character'] as int;
+                                    
+                                    if (line < diagStartLine || line > diagEndLine) {
+                                      return false;
+                                    }
+                                    
+                                    if (line == diagStartLine && line == diagEndLine) {
+                                      return character >= diagStartChar && character < diagEndChar;
+                                    } else if (line == diagStartLine) {
+                                      return character >= diagStartChar;
+                                    } else if (line == diagEndLine) {
+                                      return character < diagEndChar;
+                                    } else {
+                                      return true;
+                                    }
+                                  },
+                                  orElse: () => LspErrors(severity: 0, range: {}, message: ''),
+                                );
+                        
+                                if(diagnostic.message.isNotEmpty){
+                                  return diagnostic.message;
+                                }
+                        
+                                if(lspConfig != null){
+                                  return await lspConfig.getHover(line, character);
+                                }
+                        
+                                final hoverDetails = await lspConfig!.getHover(line, character);
+                                return hoverDetails;
+                              })(),
+                              builder: (_, snapShot) {
+                                if (snapShot.hasError) {
+                                  return SizedBox.shrink();
+                                }
+                                final data = snapShot.data;
+                                if (data == null || data.isEmpty) {
+                                  return SizedBox.shrink();
+                                }
+                                if (snapShot.connectionState == ConnectionState.waiting) {
+                                  return Text(
+                                    "Loading...",
+                                    style: _hoverDetailsStyle.textStyle,
+                                  );
+                                }
+                                return Padding(
+                                  padding: const EdgeInsets.all(8.0),
+                                  child: RawScrollbar(
+                                    controller: hoverScrollController,
+                                    thumbVisibility: true,
+                                    thumbColor: _editorTheme['root']!.color!.withAlpha(100),
+                                    child: SingleChildScrollView(
+                                      controller: hoverScrollController,
+                                      child: MarkdownBlock(
+                                        data: data,
+                                        config: MarkdownConfig.darkConfig.copy(
+                                          configs: [
+                                            PConfig(
+                                              textStyle: _hoverDetailsStyle.textStyle
+                                            ),
+                                            PreConfig(
+                                              language: widget.lspConfig?.languageId ?? "dart",
+                                              theme: _editorTheme,
+                                              textStyle: TextStyle(
+                                                fontSize: _hoverDetailsStyle.textStyle.fontSize
+                                              ),
+                                              styleNotMatched: TextStyle(
+                                                color: _editorTheme['root']!.color
+                                              ),
+                                              decoration: BoxDecoration(
+                                                borderRadius: BorderRadius.zero,
+                                                border: Border.all(
+                                                  width: 0.2,
+                                                  color: _editorTheme['root']!.color ?? Colors.grey
+                                                )
+                                              )
+                                            )
+                                          ]
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+                            ),
+                        ),
+                      ),
+                    );
+                  }
+                )
+              ],
+            ),
+          ),
+        );
+      }
+    );
+  }
+}
+
+class _CodeField extends LeafRenderObjectWidget{
+  final BuildContext context;
+  final Map<String, TextStyle> editorTheme;
+  final Mode languade;
+  final CodeForgeController controller;
+  final FocusNode focusNode;
+  final CodeSelectionStyle selectionStyle;
+  final GutterStyle gutterStyle;
+  final TextStyle? textStyle;
+  final EdgeInsets? innerPadding;
+  final ScrollController hscrollController, vscrollController;
+  final bool lineWrap, enableFolding, enableGuideLines, readOnly;
+  final CodeContent? codeContent;
+  final ValueNotifier<bool> selectionNotifier;
+  final ValueNotifier<Offset> offsetNotifier;
+  final ValueNotifier<String?> aiNotifier;
+  final ValueNotifier<Offset?> aiOffsetNotifier;
+  final ValueNotifier<List<dynamic>?> hoverNotifier;
+  final ValueNotifier<List<LspErrors>> diagnosticsNotifier;
+  final ValueNotifier<bool> isHoveringPopup;
+  final _BackspaceNotifier backspaceNotifier;
+  final bool enableGutterDivider;
+
+  const _CodeField(
+    this.context,
+    this.editorTheme,
+    this.languade,
+    this.controller,
+    this.focusNode,
+    this.textStyle,
+    this.innerPadding,
+    this.vscrollController,
+    this.hscrollController,
+    this.lineWrap,
+    this.enableFolding,
+    this.readOnly,
+    this.enableGuideLines,
+    this.codeContent,
+    this.selectionStyle,
+    this.gutterStyle,
+    this.selectionNotifier,
+    this.aiNotifier,
+    this.aiOffsetNotifier,
+    this.offsetNotifier,
+    this.hoverNotifier,
+    this.diagnosticsNotifier,
+    this.isHoveringPopup,
+    this.backspaceNotifier,
+    this.enableGutterDivider
+  );
+
+  @override
+  RenderObject createRenderObject(BuildContext context) {
+    return _CodeFieldRenderer(
+      controller: controller,
+      editorTheme: editorTheme,
+      language: languade,
+      focusNode: focusNode,
+      textStyle: textStyle,
+      innerPadding: innerPadding,
+      vscrollController: vscrollController,
+      hscrollController: hscrollController,
+      lineWrap: lineWrap,
+      enableFolding: enableFolding,
+      enableGuideLines: enableGuideLines,
+      readOnly: readOnly,
+      codeContent: codeContent,
+      selectionStyle: selectionStyle,
+      gutterStyle: gutterStyle,
+      selectionNotifier: selectionNotifier,
+      aiNotifier: aiNotifier,
+      aiOffsetNotifier: aiOffsetNotifier,
+      offsetNotifier: offsetNotifier,
+      hoverNotifier: hoverNotifier,
+      diagnosticsNotifier: diagnosticsNotifier,
+      isHoveringPopup: isHoveringPopup,
+      backspaceNotifier: backspaceNotifier,
+      enableGutterDivider: enableGutterDivider
+    );
+  }
+
+  @override
+  void updateRenderObject(BuildContext context, covariant _CodeFieldRenderer renderObject) {
+    renderObject
+      .._controller = controller
+      ..editorTheme = editorTheme
+      ..language = languade
+      ..textStyle = textStyle
+      ..lineWrap = lineWrap
+      ..enableFolding = enableFolding
+      ..enableGuideLines = enableGuideLines
+      ..codeContent = codeContent
+      ..selectionStyle = selectionStyle
+      ..gutterStyle = gutterStyle
+      ..readOnly = readOnly
+      ..innerPadding = innerPadding;
+  }
+}
+
+class _CodeFieldRenderer extends RenderBox implements MouseTrackerAnnotation{
+  late TextPainter tp;
+  late Mode _language;
+  late double _caretHeight = 0.0;
+  late String _langId;
+  late double _gutterWidth;
+  late final bool _enableGutterDivider;
+  late final Paint _caretPainter;
+  late final CodeSelectionStyle _selectionStyle;
+  late final GutterStyle _gutterStyle;
+  late final ValueNotifier<bool> _selectionNotifier;
+  late final ValueNotifier<String?> _aiNotifier;
+  late final ValueNotifier<Offset?> _aiOffsetNotifier;
+  late final ValueNotifier<Offset> _offsetNotifier;
+  late final ValueNotifier<List<dynamic>?> _hoverNotifier;
+  late final ValueNotifier<List<LspErrors>> _diagnosticsNotifier;
+  late final TextPainter _tempTp;
+  final ValueNotifier<bool> _isHoveringPopup;
+  final List<double> _lineTops = [], _lineHeights = [];
+  final Map<int, List<InlineSpan>> _cachedSpans  =  {};
+  final Map<int, TextPainter> _lineTpCache = {};
+  final Map<int, String> _inFlightEdits = {};
+  final _dtap = DoubleTapGestureRecognizer();
+  final _oneTap = TapGestureRecognizer();
+  final FocusNode _focusNode;
+  final ScrollController _vscrollController, _hscrollController;
+  final bool isMobile = Platform.isAndroid || Platform.isIOS;
+  Offset _currerntPosition = Offset.zero;
+  bool _draggingStartHandle = false, _draggingEndHandle = false, _lineWrap;
+  bool _enableFolding, _enableGuideLines,  _draggingCHandle = false;
+  bool _showCaret = true, _showBubble = false, _readOnly = false;
+  List<String> _lines = [];
+  List<_Pair> _cachedBracketPairs = [];
+  List<FoldRange> _foldRanges = [];
+  List<LspErrors> _diagnostics = [];
+  CodeForgeController _controller;
+  Map<String, TextStyle> _editorTheme;
+  Offset _carretOffset;
+  Timer? _caretTimer;
+  TextStyle? _textStyle;
+  EdgeInsets? _innerPadding;
+  CodeContent? _codeContent;
+  TextSelection? _lastSelection, _lastSelectionForAi;
+  Rect? _startHandleRect, _endHandleRect, _normalHandle;
+  double _gutterPadding = 0.0;
+  String? _aiResponse, _lastProcessedText;
+  TextEditingValue? _prevValue;
+
+  _CodeFieldRenderer({
+    required Map<String, TextStyle> editorTheme,
+    required Mode language,
+    required CodeForgeController controller,
+    required FocusNode focusNode,
+    required TextStyle? textStyle,
+    required EdgeInsets? innerPadding,
+    required ScrollController vscrollController,
+    required ScrollController hscrollController,
+    required bool lineWrap,
+    required bool enableFolding,
+    required bool enableGuideLines,
+    required bool readOnly,
+    required CodeContent? codeContent,
+    required CodeSelectionStyle selectionStyle,
+    required GutterStyle gutterStyle,
+    required ValueNotifier<bool> selectionNotifier,
+    required ValueNotifier<String?> aiNotifier,
+    required ValueNotifier<Offset?> aiOffsetNotifier,
+    required ValueNotifier<Offset> offsetNotifier,
+    required ValueNotifier<List<dynamic>?> hoverNotifier,
+    required ValueNotifier<List<LspErrors>> diagnosticsNotifier,
+    required ValueNotifier<bool> isHoveringPopup,
+    required _BackspaceNotifier backspaceNotifier,
+    required bool enableGutterDivider
+  }):_editorTheme = editorTheme,
+    _controller = controller,
+    _carretOffset = Offset(0, 0),
+    _focusNode = focusNode,
+    _textStyle = textStyle,
+    _innerPadding = innerPadding,
+    _vscrollController = vscrollController,
+    _hscrollController = hscrollController,
+    _lineWrap = lineWrap,
+    _enableFolding = enableFolding,
+    _enableGuideLines = enableGuideLines,
+    _readOnly = readOnly,
+    _codeContent = codeContent,
+    _language = language,
+    _selectionStyle = selectionStyle,
+    _gutterStyle = gutterStyle,
+    _selectionNotifier = selectionNotifier,
+    _aiNotifier = aiNotifier,
+    _aiOffsetNotifier = aiOffsetNotifier,
+    _offsetNotifier = offsetNotifier,
+    _hoverNotifier = hoverNotifier,
+    _diagnosticsNotifier = diagnosticsNotifier,
+    _isHoveringPopup = isHoveringPopup,
+    _enableGutterDivider = enableGutterDivider,
+    _caretPainter = Paint()
+      ..color = selectionStyle.cursorColor ?? editorTheme['root']!.color!
+      ..style = PaintingStyle.fill
+    {
+
+      _tempTp = TextPainter(
+        text: TextSpan(
+          text: "8", style: _textStyle ?? editorTheme['root']
+        ),
+        textDirection: TextDirection.ltr
+      );
+
+      _tempTp.layout();
+
+      _gutterPadding = _tempTp.width * 2;
+      _gutterWidth = _gutterStyle.gutterWidth ?? 0.0;
+
+      _vscrollController.addListener((){
+        _selectionTimer?.cancel();
+        markNeedsPaint();
+      });
+
+      _hscrollController.addListener((){
+        _selectionTimer?.cancel();
+        markNeedsPaint();
+      });
+
+      backspaceNotifier.addListener(() {
+        final idx = backspaceNotifier.lineIndex;
+        final text = backspaceNotifier.lineText;
+        _showCaret = true;
+        if (idx == null) {
+          _inFlightEdits.clear();
+        } else {
+          _inFlightEdits[idx] = text;
+        }
+        _carretOffset = Offset(
+          backspaceNotifier.caretOffset?.dx ?? _carretOffset.dx,
+          _lineTops[backspaceNotifier.lineIndex ?? 0]
+        );
+        if (idx != null) _cachedSpans.remove(idx);
+        markNeedsPaint();
+      });
+
+      _focusNode.addListener(markNeedsPaint);
+
+      String lastText = _controller.text;
+
+      _controller.addListener((){
+        final prevValue = _prevValue;
+        final currValue = _controller.value;
+        final newText = _controller.text;
+        final oldLines = lastText.split('\n');
+        final newLines = newText.split('\n');
+        final changedLines = _findChangedLines(oldLines, newLines);
+        _lines = newLines;
+        _cachedBracketPairs = _computeBracketPairs(newText);
+        
+        for (final i in changedLines) {
+          _cachedSpans.remove(i);
+        }
+        lastText = newText;
+
+        if (prevValue != null && 
+            currValue.text.length != prevValue.text.length &&
+            currValue.selection.isCollapsed) {
+          final cursorLine = _getLineAtOffset(currValue.selection.extentOffset);
+          _autoUnfoldOnEdit(cursorLine);
+        }
+
+        if (prevValue != null &&
+            currValue.selection.start != currValue.selection.end) {
+          final startLine = _getLineAtOffset(currValue.selection.start);
+          final endLine = _getLineAtOffset(currValue.selection.end);
+          _autoUnfoldOnSelection(startLine, endLine);
+        }
+
+        final oldFoldRanges = Map.fromEntries(
+          _foldRanges.map((f) => MapEntry('{f.startIndex}-{f.endIndex}', f))
+        );
+        final newFoldRanges = _getFoldRanges(_lines);
+
+        for (final newFold in newFoldRanges) {
+          final key = '{newFold.startIndex}-{newFold.endIndex}';
+          if (oldFoldRanges.containsKey(key)) {
+            final oldFold = oldFoldRanges[key]!;
+            newFold.isFolded = oldFold.isFolded;
+
+            for (final oldChild in oldFold.originallyFoldedChildren) {
+              final childKey = '{oldChild.startIndex}-{oldChild.endIndex}';
+              final matchingChild = newFoldRanges.firstWhere(
+                (f) => '{f.startIndex}-{f.endIndex}' == childKey,
+                orElse: () => FoldRange(-1, -1)
+              );
+              if (matchingChild.startIndex != -1 && 
+                  matchingChild.startIndex > newFold.startIndex && 
+                  matchingChild.endIndex <= newFold.endIndex) {
+                newFold.addOriginallyFoldedChild(matchingChild);
+              }
+            }
+          }
+        }
+        _foldRanges = newFoldRanges;
+        
+        _gutterWidth = _gutterStyle.gutterWidth ??
+          ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+        _showCaret = true;
+        _caretTimer?.cancel();
+        _caretTimer = Timer.periodic(Duration(milliseconds: 500),(timer) {
+          _showCaret = !_showCaret;
+          markNeedsPaint();
+        });
+
+        final cursorPosition = _controller.selection.extentOffset.clamp(0, _controller.text.length);
+        final textBeforeCursor = _controller.text.substring(0, cursorPosition);
+        final lastTypedChar = textBeforeCursor.isNotEmpty
+          ? textBeforeCursor[textBeforeCursor.length - 1].replaceAll("\n", '')
+          : '';
+          
+        if (_lastProcessedText == newText &&
+            _aiResponse != null &&
+            _aiResponse!.isNotEmpty &&
+            _lastSelectionForAi != _controller.selection)
+          {
+          _aiNotifier.value = null;
+          _aiOffsetNotifier.value = null;
+        }
+        _lastSelectionForAi = _controller.selection;
+
+        
+
+        if (_aiResponse != null && _aiResponse!.isNotEmpty && lastTypedChar.isNotEmpty) {
+          if (_aiResponse![0] == lastTypedChar) {
+            _aiResponse = _aiResponse!.substring(1);
+            if (_aiResponse!.isEmpty) {
+              _aiNotifier.value = null;
+              _aiOffsetNotifier.value = null;
+            }
+          } else {
+            _aiNotifier.value = null;
+            _aiOffsetNotifier.value = null;
+          }
+        }
+        
+        if(
+          currValue.text == prevValue?.text &&
+          currValue.selection.extentOffset != prevValue?.selection.extentOffset
+        ){
+            _showBubble = true;
+            return;
+        } else {
+          _showBubble = false;
+        }
+
+        _prevValue = currValue;
+
+        if (_lastProcessedText == newText) return;
+        _lastProcessedText = newText;
+      });
+
+      _aiNotifier.addListener((){
+        _aiResponse = _aiNotifier.value;
+        _aiOffsetNotifier.value = _codeContent?.caretOffset;
+        markNeedsLayout();
+        markNeedsPaint();
+      });
+
+      _langId = language.hashCode.toString();
+      highlight.registerLanguage(_langId, _language);
+
+      _diagnosticsNotifier.addListener((){
+        _diagnostics = _diagnosticsNotifier.value;
+      });
+  }
+
+  Map<String, TextStyle> get editorTheme => _editorTheme;
+
+  set codeContent(CodeContent? cc){
+    if(cc == null) return;
+    if(cc.hashCode == _codeContent.hashCode) return;
+    
+    _codeContent = cc;
+    tp = _codeContent?.tp ?? TextPainter(textDirection: TextDirection.ltr);
+    final tpWidth = _lineWrap
+        ? size.width - (_innerPadding?.left ?? 0) - (_innerPadding?.right ?? 0)
+        : double.infinity;
+    tp.layout(maxWidth: tpWidth);
+    _carretOffset = cc.caretOffset;
+    _caretHeight = tp.getFullHeightForCaret(
+      TextPosition(offset: cc.currentSelection.extentOffset),
+      Rect.zero
+    );
+
+    if (_lastSelection != _controller.selection) {
+      _lastSelection = _controller.selection;
+      markNeedsPaint();
+      _ensureCaretVisible();
+    }
+  }
+
+  set selectionStyle(CodeSelectionStyle selectionStyle){
+    if(identical(selectionStyle, _selectionStyle)) return;
+    _selectionStyle = selectionStyle;
+    markNeedsPaint();
+  }
+
+  set gutterStyle(GutterStyle gs){
+    if(identical(_gutterStyle, gs)) return;
+    _gutterStyle = _gutterStyle;
+    markNeedsPaint();
+  }
+
+  set enableFolding(bool fl){
+    if(_enableFolding == fl) return;
+    _enableFolding = fl;
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+  
+  set enableGuideLines(bool gl){
+    if(_enableGuideLines == gl) return;
+    _enableGuideLines = gl;
+    markNeedsPaint();
+  }
+
+  set lineWrap(bool lw){
+    if(lw == _lineWrap) return;
+    _lineWrap = lw;
+    markNeedsLayout();
+  }
+
+  set editorTheme(Map<String, TextStyle> et) {
+    if (identical(et, _editorTheme)) return;
+    _editorTheme = et;
+    
+    _tempTp.text = TextSpan(
+      text: "8", 
+      style: _textStyle ?? _editorTheme['root']
+    );
+    _tempTp.layout();
+    
+    _gutterPadding = _tempTp.width * 2;
+    _gutterWidth = _gutterStyle.gutterWidth ?? 
+      ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+    
+    _lineTpCache.clear();
+    _cachedSpans.clear();
+    
+    markNeedsLayout();
+  }
+
+  set language(Mode lang){
+    if(identical(lang, _language)) return;
+    _language = lang;
+    _langId = lang.hashCode.toString();
+    highlight.registerLanguage(_langId, lang);
+    markNeedsPaint();
+  }
+
+  set innerPadding(EdgeInsets? p){
+    if(identical(p, _innerPadding)) return;
+    _innerPadding = p;
+    markNeedsLayout();
+  }
+
+  set readOnly(bool ro) {
+    if (_readOnly == ro) return;
+    _readOnly = ro;
+    
+    // Close text input connection when readonly
+    if (_readOnly && _controller.connection != null) {
+      _controller.connection?.close();
+      _controller.connection = null;
+    }
+    
+    markNeedsPaint();
+  }
+
+  set textStyle(TextStyle? ts){
+      if(identical(ts, _textStyle)) return;
+      _textStyle = ts;
+      
+      _tempTp.text = TextSpan(
+        text: "8", 
+        style: _textStyle ?? _editorTheme['root']
+      );
+      _tempTp.layout();
+      
+      _gutterPadding = _tempTp.width * 2;
+      _gutterWidth = _gutterStyle.gutterWidth ?? 
+        ((_lines.length.toString().length) * _tempTp.width) + _gutterPadding * 2;
+      
+      _lineTpCache.clear();
+      _cachedSpans.clear();
+      
+      markNeedsLayout();
+      markNeedsPaint();
+    }
+
+  List<int> _findChangedLines(List<String> oldLines, List<String> newLines) {
+    final changed = <int>[];
+    final maxLen = max(oldLines.length, newLines.length);
+    for (int i = 0; i < maxLen; i++) {
+      final oldLine = i < oldLines.length ? oldLines[i] : '';
+      final newLine = i < newLines.length ? newLines[i] : '';
+      if (oldLine != newLine) {
+        changed.add(i);
+      }
+    }
+    return changed;
+  }
+
+  List<TextSpan> _convert(
+    List<Node> nodes, [
+    int startOffset = 0,
+  ]) {
+    List<TextSpan> spans = [];
+    int offset = startOffset;
+
+    for (final node in nodes) {
+      if (node.value != null) {
+        final nodeLines = node.value!.split('\n');
+        for (int lineIdx = 0; lineIdx < nodeLines.length; lineIdx++) {
+          final line = nodeLines[lineIdx];
+          if (line.isNotEmpty) {
+            spans.add(TextSpan(
+              text: line,
+              style: editorTheme[node.className ?? ''],
+            ));
+          }
+          if (lineIdx != nodeLines.length - 1) {
+            spans.add(const TextSpan(text: '\n'));
+          }
+        }
+        offset += node.value!.length;
+      } else if (node.children != null) {
+        final inner = _convert(node.children!, offset);
+        spans.add(TextSpan(
+          children: inner,
+          style: editorTheme[node.className ?? ''],
+        ));
+        offset += _textLengthFromSpans(inner);
+      }
+    }
+
+    return spans;
+  }
+
+  int _textLengthFromSpans(List<InlineSpan> spans) {
+    int length = 0;
+    for (final span in spans) {
+      if (span is TextSpan && span.text != null) {
+        length += span.text!.length;
+      }
+      if (span is TextSpan && span.children != null) {
+        length += _textLengthFromSpans(span.children!);
+      }
+    }
+    return length;
+  }
+
+  List<InlineSpan> _applyBracketHighlight(
+    List<InlineSpan> spans,
+    int lineStart,
+    int? b1,
+    int? b2,
+    Set<int> unmatched,
+  ) {
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+
+        if (text != null) {
+          bool needsHighlighting = false;
+          for (int i = 0; i < text.length; i++) {
+            final globalIdx = offset + i;
+            if (unmatched.contains(globalIdx) || globalIdx == b1 || globalIdx == b2) {
+              needsHighlighting = true;
+              break;
+            }
+          }
+
+          if (needsHighlighting) {
+            List<TextSpan> charSpans = [];
+            for (int i = 0; i < text.length; i++) {
+              final globalIdx = offset + i;
+              TextStyle? charStyle = span.style;
+
+              if (unmatched.contains(globalIdx)) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  color: Colors.red,
+                  decoration: TextDecoration.underline,
+                  decorationStyle: TextDecorationStyle.wavy,
+                );
+              } else if (globalIdx == b1 || globalIdx == b2) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  background: Paint()
+                    ..style = PaintingStyle.stroke
+                    ..strokeWidth = 1.2
+                    ..color = editorTheme['root']?.color ?? Colors.white,
+                );
+              }
+
+              charSpans.add(TextSpan(text: text[i], style: charStyle));
+            }
+            result.add(TextSpan(children: charSpans));
+          } else {
+            result.add(span);
+          }
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applyBracketHighlight(children, offset, b1, b2, unmatched);
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += _textLengthFromSpans(childSpans);
+        }
+      }
+    }
+    return result;
+  }
+  
+  List<InlineSpan> _applyDiagnosticsStyling(
+    List<InlineSpan> spans,
+    int lineIndex,
+    int lineStart,
+  ) {
+    if (_diagnostics.isEmpty) return spans;
+    
+    final lineDiagnostics = _diagnostics.where((diag) {
+      final startLine = diag.range['start']['line'] as int;
+      final endLine = diag.range['end']['line'] as int;
+      return lineIndex >= startLine && lineIndex <= endLine;
+    }).toList();
+    
+    if (lineDiagnostics.isEmpty) return spans;
+    
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+    
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+        
+        if (text != null) {
+          int spanStart = offset;
+          int spanEnd = offset + text.length;
+          
+          bool hasDiagnostic = false;
+          Color? diagnosticColor;
+          
+          for (final diag in lineDiagnostics) {
+            final diagStartLine = diag.range['start']['line'] as int;
+            final diagEndLine = diag.range['end']['line'] as int;
+            final diagStartChar = diag.range['start']['character'] as int;
+            final diagEndChar = diag.range['end']['character'] as int;
+            
+            int diagStart, diagEnd;
+            
+            if (diagStartLine == lineIndex && diagEndLine == lineIndex) {
+              diagStart = lineStart + diagStartChar;
+              diagEnd = lineStart + diagEndChar;
+            } else if (diagStartLine == lineIndex) {
+              diagStart = lineStart + diagStartChar;
+              diagEnd = spanEnd;
+            } else if (diagEndLine == lineIndex) {
+              diagStart = lineStart;
+              diagEnd = lineStart + diagEndChar;
+            } else {
+              diagStart = lineStart;
+              diagEnd = spanEnd;
+            }
+            
+            if (!(spanEnd <= diagStart || spanStart >= diagEnd)) {
+              hasDiagnostic = true;
+              diagnosticColor = switch (diag.severity) {
+                1 => Colors.red,
+                2 => Colors.amber,
+                3 => Colors.blueAccent,
+                _ => null,
+              };
+              break;
+            }
+          }
+          
+          if (hasDiagnostic && diagnosticColor != null) {
+            List<TextSpan> charSpans = [];
+            
+            for (int i = 0; i < text.length; i++) {
+              final globalIdx = spanStart + i;
+              bool inDiagnostic = false;
+              Color? charDiagColor;
+              
+              for (final diag in lineDiagnostics) {
+                final diagStartLine = diag.range['start']['line'] as int;
+                final diagEndLine = diag.range['end']['line'] as int;
+                final diagStartChar = diag.range['start']['character'] as int;
+                final diagEndChar = diag.range['end']['character'] as int;
+                
+                int diagStart, diagEnd;
+                
+                if (diagStartLine == lineIndex && diagEndLine == lineIndex) {
+                  diagStart = lineStart + diagStartChar;
+                  diagEnd = lineStart + diagEndChar;
+                } else if (diagStartLine == lineIndex) {
+                  diagStart = lineStart + diagStartChar;
+                  diagEnd = lineStart + text.length;
+                } else if (diagEndLine == lineIndex) {
+                  diagStart = lineStart;
+                  diagEnd = lineStart + diagEndChar;
+                } else {
+                  diagStart = lineStart;
+                  diagEnd = lineStart + text.length;
+                }
+                
+                if (globalIdx >= diagStart && globalIdx < diagEnd) {
+                  inDiagnostic = true;
+                  charDiagColor = switch (diag.severity) {
+                    1 => Colors.red,
+                    2 => Colors.amber,
+                    3 => Colors.blueAccent,
+                    _ => null,
+                  };
+                  break;
+                }
+              }
+              
+              TextStyle? charStyle = span.style;
+              if (inDiagnostic && charDiagColor != null) {
+                charStyle = (charStyle ?? const TextStyle()).copyWith(
+                  decoration: TextDecoration.underline,
+                  decorationStyle: TextDecorationStyle.wavy,
+                  decorationThickness: 2,
+                  decorationColor: charDiagColor,
+                );
+              }
+              
+              charSpans.add(TextSpan(text: text[i], style: charStyle));
+            }
+            
+            result.add(TextSpan(children: charSpans));
+          } else {
+            result.add(span);
+          }
+          
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applyDiagnosticsStyling(children, lineIndex, offset);
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += _textLengthFromSpans(childSpans);
+        }
+      }
+    }
+    
+    return result;
+  }
+
+  List<InlineSpan> _applySelectionToSpans(
+    List<InlineSpan> spans,
+    int lineStart,
+    int selectionStart,
+    int selectionEnd,
+    Color selectedColor,
+  ) {
+    List<InlineSpan> result = [];
+    int offset = lineStart;
+  
+    for (final span in spans) {
+      if (span is TextSpan) {
+        final text = span.text;
+        final children = span.children;
+  
+        if (text != null) {
+          int spanStart = offset;
+          int spanEnd = offset + text.length;
+  
+          if (selectionEnd <= spanStart || selectionStart >= spanEnd) {
+            result.add(span);
+          } else {
+            int selStartInSpan = max(selectionStart - spanStart, 0);
+            int selEndInSpan = min(selectionEnd - spanStart, text.length);
+  
+            if (selStartInSpan > 0) {
+              result.add(TextSpan(
+                text: text.substring(0, selStartInSpan),
+                style: span.style,
+              ));
+            }
+            result.add(TextSpan(
+              text: text.substring(selStartInSpan, selEndInSpan),
+              style: span.style?.copyWith(
+                backgroundColor: selectedColor
+              ) ?? TextStyle(backgroundColor: _selectionStyle.selectionColor),
+            ));
+            if (selEndInSpan < text.length) {
+              result.add(TextSpan(
+                text: text.substring(selEndInSpan),
+                style: span.style,
+              ));
+            }
+          }
+          offset += text.length;
+        } else if (children != null && children.isNotEmpty) {
+          final childSpans = _applySelectionToSpans(
+            children,
+            offset,
+            selectionStart,
+            selectionEnd,
+            selectedColor,
+          );
+          final childrenLength = childSpans.fold<int>(0, (sum, s) {
+            if (s is TextSpan && s.text != null) {
+              return sum + s.text!.length;
+            }
+            return sum;
+          });
+          result.add(TextSpan(children: childSpans, style: span.style));
+          offset += childrenLength;
+        }
+      }
+    }
+    return result;
+  }
+
+  Set<int> _findUnmatchedBrackets(String text) {
+    final stack = <int>[];
+    final unmatched = <int>{};
+    const pairs = {'(': ')', '{': '}', '[': ']', "'": "'", '"': '"'};
+    const openers = {'(', '{', '[', "'", '"'};
+    const closers = {')', '}', ']', "'", '"'};
+    String? currentStringQuote;
+
+    for (int i = 0; i < text.length; i++) {
+      final char = text[i];
+
+      if (char == '"' || char == "'") {
+        if (currentStringQuote == null) {
+          currentStringQuote = char;
+          stack.add(i);
+        } else if (currentStringQuote == char) {
+          if (stack.isNotEmpty && text[stack.last] == char) {
+            stack.removeLast();
+            currentStringQuote = null;
+          } else {
+            unmatched.add(i);
+          }
+        } else {
+          continue;
+        }
+        continue;
+      }
+
+      if (currentStringQuote != null) continue;
+
+      if (openers.contains(char)) {
+        stack.add(i);
+      } else if (closers.contains(char)) {
+        if (stack.isEmpty) {
+          unmatched.add(i);
+        } else {
+          final lastOpen = stack.last;
+          final openChar = text[lastOpen];
+          if (pairs[openChar] == char) {
+            stack.removeLast();
+          } else {
+            unmatched.add(i);
+          }
+        }
+      }
+    }
+
+    unmatched.addAll(stack);
+    
+    return unmatched;
+  }
+
+  int? _findMatchingBracket(String text, int pos) {
+    const Map<String, String> pairs = {
+      '(': ')',
+      '{': '}',
+      '[': ']',
+      ')': '(',
+      '}': '{',
+      ']': '[',
+    };
+    const String openers = '({[';
+
+    if (pos < 0 || pos >= text.length) return null;
+
+    final char = text[pos];
+    if (!pairs.containsKey(char)) return null;
+
+    final match = pairs[char]!;
+    final isForward = openers.contains(char);
+
+    int depth = 0;
+    if (isForward) {
+      for (int i = pos + 1; i < text.length; i++) {
+        if (text[i] == char) depth++;
+        if (text[i] == match) {
+          if (depth == 0) return i;
+          depth--;
+        }
+      }
+    } else {
+      for (int i = pos - 1; i >= 0; i--) {
+        if (text[i] == char) depth++;
+        if (text[i] == match) {
+          if (depth == 0) return i;
+          depth--;
+        }
+      }
+    }
+    return null;
+  }
+
+  int _findFirstVisibleLine(double viewTop) {
+    if(_lineTops.isEmpty) return 0;
+    int low = 0, high = _lineTops.length - 1, mid;
+    while (low < high) {
+      mid = (low + high) >> 1;
+      if (_lineTops[mid] < viewTop) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low.clamp(0, _lineTops.length - 1);
+  }
+
+  int _findLastVisibleLine(double viewBottom) {
+    if (_lineTops.isEmpty) return 0;
+    int low = 0, high = _lineTops.length - 1, mid;
+    while (low < high) {
+      mid = (low + high + 1) >> 1;
+      if (_lineTops[mid] <= viewBottom) {
+        low = mid;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return low.clamp(0, _lineTops.length - 1);
+  }
+
+  List<_Pair> _computeBracketPairs(String text) {
+    final pairs = <_Pair>[];
+    final stack = <int>[];
+    const openers = {'(', '{', '['};
+    const closers = {')', '}', ']'};
+    const matching = {'(': ')', '{': '}', '[': ']'};
+
+    for (int i = 0; i < text.length; i++) {
+      final ch = text[i];
+      if (openers.contains(ch)) {
+        stack.add(i);
+      } else if (closers.contains(ch)) {
+        if (stack.isNotEmpty) {
+          final open = stack.removeLast();
+          final openChar = text[open];
+          if (matching[openChar] == ch) {
+            pairs.add(_Pair(open, i));
+          }
+        }
+      }
+    }
+    return pairs;
+  }
+
+  Map<String,int> _indexToLineCol(int idx, List<int> lineStarts, List<String> lines) {
+    int low = 0, high = lineStarts.length - 1;
+    while (low <= high) {
+      int mid = (low + high) >> 1;
+      if (lineStarts[mid] <= idx) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    final int line = high.clamp(0, lineStarts.length - 1);
+    final int col = idx - lineStarts[line];
+    return {'line': line, 'col': col};
+  }
+
+  TextPainter _getLinePainter(int line, List<InlineSpan> baseSpans, double maxWidth, TextStyle defaultStyle) {
+    final cached = _lineTpCache[line];
+    if (cached != null) return cached;
+    final tpLine = TextPainter(
+      text: TextSpan(style: defaultStyle, children: baseSpans),
+      textDirection: TextDirection.ltr,
+    );
+    tpLine.layout(maxWidth: maxWidth);
+    _lineTpCache[line] = tpLine;
+    return tpLine;
+  }
+
+  Set<int> _findUnmatchedQuotesInLine(String lineText, int lineStartOffset) {
+    final unmatched = <int>{};
+    int? unclosedStringStart;
+
+    for (int i = 0; i < lineText.length; i++) {
+      final char = lineText[i];
+      final globalIdx = lineStartOffset + i;
+
+      if (char == '"' || char == "'") {
+        if (unclosedStringStart == null) {
+          unclosedStringStart = globalIdx;
+        } else {
+          final openingQuoteChar = lineText[unclosedStringStart - lineStartOffset];
+          if (openingQuoteChar == char) {
+            unclosedStringStart = null;
+          }
+        }
+        continue;
+      }
+    }
+
+    if (unclosedStringStart != null) {
+      for (int i = (unclosedStringStart - lineStartOffset); i < lineText.length; i++) {
+        unmatched.add(lineStartOffset + i);
+      }
+    }
+    
+    return unmatched;
+  }
+
+  List<FoldRange> _getFoldRanges(List<String> lines) {
+    List<FoldRange> foldRanges = [];
+    if (!_enableFolding) return foldRanges;
+    
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      if (line.trim().isEmpty || !line.trim().endsWith(':')) continue;
+      
+      final startIndent = line.length - line.trimLeft().length;
+      int j = i + 1;
+      
+      while (j < lines.length) {
+        final next = lines[j];
+        if (next.trim().isEmpty) {
+          j++;
+          continue;
+        }
+        final nextIndent = next.length - next.trimLeft().length;
+        if (nextIndent <= startIndent) break;
+        j++;
+      }
+      
+      if (j > i + 1 && j <= lines.length) {
+        foldRanges.add(FoldRange(i, j - 1));
+      }
+    }
+    
+    final Map<String, List<int>> stacks = {"{": [], "[": [], "(": []};
+    const Map<String, String> matchingBrackets = {"{": "}", "[": "]", "(": ")"};
+    
+    for (final openBracket in matchingBrackets.keys) {
+      final closeBracket = matchingBrackets[openBracket]!;
+      for (int i = 0; i < lines.length; i++) {
+        if (lines[i].contains(openBracket)) stacks[openBracket]!.add(i);
+        if (lines[i].contains(closeBracket)) {
+          if (stacks[openBracket]!.isNotEmpty) {
+            int start = stacks[openBracket]!.removeLast();
+            if (i > start) {
+              bool conflictsWithColonFold = foldRanges.any((fold) => 
+                (fold.startIndex == start && fold.endIndex == i) ||
+                (fold.startIndex == start) ||
+                (fold.endIndex == i && fold.startIndex < start)
+              );
+              
+              if (!conflictsWithColonFold) {
+                foldRanges.add(FoldRange(start, i));
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    foldRanges.sort((a, b) => a.startIndex.compareTo(b.startIndex));
+    
+    return foldRanges;
+  }
+
+  Map<String, int> _offsetToLineChar(int offset) {
+    final lines = _controller.text.split('\n');
+    int accum = 0;
+    for (int i = 0; i < lines.length; i++) {
+      final lineLen = lines[i].length;
+      if (offset >= accum && offset <= accum + lineLen) {
+        return {
+          'line': i,
+          'character': offset - accum,
+        };
+      }
+      accum += lineLen + 1;
+    }
+    final last = lines.length - 1;
+    return {
+      'line': last,
+      'character': lines.isNotEmpty ? lines.last.length : 0,
+    };
+  }
+
+  bool _isOffsetOverWord(int offset) {
+    final text = _controller.text;
+    if (offset < 0 || offset >= text.length) return false;
+    return RegExp(r'\w').hasMatch(text[offset]);
+  }
+
+  int _getGlobalPositionFromVisible(int visiblePosition) {
+    final lines = _controller.text.split('\n');
+    int visibleOffset = 0;
+    int globalOffset = 0;
+
+    for (int i = 0; i < lines.length; i++) {
+      final isFolded = _foldRanges.any((fold) => 
+        fold.isFolded && i > fold.startIndex && i <= fold.endIndex);
+
+      if (!isFolded) {
+        final lineLength = lines[i].length;
+        if (visiblePosition >= visibleOffset && visiblePosition <= visibleOffset + lineLength) {
+          return globalOffset + (visiblePosition - visibleOffset);
+        }
+        visibleOffset += lineLength + 1;
+        globalOffset += lineLength + 1;
+      } else {
+        globalOffset += lines[i].length + 1;
+      }
+    }
+    return globalOffset;
+  }
+
+  bool _isWordBoundary(String char) {
+    return char.trim().isEmpty || !RegExp(r'\w').hasMatch(char);
+  }
+
+  List<String> _buildDisplayLinesWithAI() {
+    if (_aiResponse != null && _aiResponse!.isNotEmpty && _controller.selection.isValid) {
+      final cursorPosition = _controller.selection.extentOffset;
+      final before = _controller.text.substring(0, cursorPosition);
+      final after = _controller.text.substring(cursorPosition);
+      return (before + _aiResponse! + after).split('\n');
+    } 
+    return _controller.text.split('\n');
+    
+  }
+
+  void _toggleFold(FoldRange fold) {
+    if (fold.isFolded) {
+      _unfoldWithChildren(fold);
+    } else {
+      _foldWithChildren(fold);
+    }
+    _controller.folds = _foldRanges;
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+
+  void _foldWithChildren(FoldRange parentFold) {
+    parentFold.clearOriginallyFoldedChildren();
+    
+    for (final childFold in _foldRanges) {
+      if (childFold.isFolded && 
+          childFold != parentFold &&
+          childFold.startIndex > parentFold.startIndex && 
+          childFold.endIndex <= parentFold.endIndex) {
+        parentFold.addOriginallyFoldedChild(childFold);
+        childFold.isFolded = false;
+      }
+    }
+    
+    parentFold.isFolded = true;
+  }
+
+  void _unfoldWithChildren(FoldRange parentFold) {
+    parentFold.isFolded = false;
+    for (final childFold in parentFold.originallyFoldedChildren) {
+      if (childFold.startIndex > parentFold.startIndex && 
+          childFold.endIndex <= parentFold.endIndex) {
+        childFold.isFolded = true;
+      }
+    }
+    parentFold.clearOriginallyFoldedChildren();
+  }
+
+  int _getLineAtOffset(int offset) {
+    final text = _controller.text;
+    final beforeCursor = text.substring(0, offset.clamp(0, text.length));
+    return beforeCursor.split('\n').length - 1;
+  }
+  
+ void _autoUnfoldOnEdit(int lineIndex) {
+  bool needsUpdate = false;
+  
+  for (final fold in _foldRanges) {
+    if (fold.isFolded && 
+        (fold.startIndex == lineIndex || 
+         (lineIndex > fold.startIndex && lineIndex <= fold.endIndex))) {
+      fold.isFolded = false;
+      
+      for (final child in fold.originallyFoldedChildren) {
+        child.isFolded = true;
+      }
+      fold.clearOriginallyFoldedChildren();
+      
+      needsUpdate = true;
+    }
+  }
+  
+  if (needsUpdate) {
+    markNeedsLayout();
+    markNeedsPaint();
+  }
+}
+
+  void _autoUnfoldOnSelection(int startLine, int endLine) {
+    bool needsUpdate = false;
+    
+    for (final fold in _foldRanges) {
+      if (!fold.isFolded) continue;
+      
+      final selectionAffectsFold = 
+        (startLine <= fold.startIndex && endLine >= fold.startIndex) ||
+        (startLine <= fold.endIndex && endLine >= fold.endIndex) ||
+        (startLine > fold.startIndex && endLine <= fold.endIndex) ||
+        (startLine >= fold.startIndex && startLine <= fold.endIndex) ||
+        (endLine >= fold.startIndex && endLine <= fold.endIndex);
+      
+      if (selectionAffectsFold) {
+        fold.isFolded = false;
+        
+        for (final child in fold.originallyFoldedChildren) {
+          child.isFolded = true;
+        }
+        fold.clearOriginallyFoldedChildren();
+        
+        needsUpdate = true;
+      }
+    }
+    
+    if (needsUpdate) {
+      markNeedsLayout();
+      markNeedsPaint();
+    }
+  }
+
+  void _drawIndentationGuidelines(Canvas canvas, Offset offset, List<String> displayLines, int firstVisibleLine, int lastVisibleLine, double maxLinePainterWidth) {
+    if (!_enableGuideLines) return;
+    
+    final tempMeasure = TextPainter(
+      text: TextSpan(
+        text: " ",
+        style: _textStyle ?? _editorTheme['root']
+      ),
+      textDirection: TextDirection.ltr
+    );
+    tempMeasure.layout();
+
+    final double charWidth = tempMeasure.width;
+    final viewTop = _vscrollController.offset;
+    final viewBottom = viewTop + _vscrollController.position.viewportDimension;
+    final cursorPosition = _controller.selection.extentOffset;
+    final textBeforeCursor = _controller.text.substring(0, cursorPosition.clamp(0, _controller.text.length));
+    final currentLine = textBeforeCursor.split('\n').length - 1;
+    final tabSize = 4;
+    List<({int startLine, int endLine, int indentLevel})> blocks = [];
+    
+    for (int i = 0; i < displayLines.length; i++) {
+      if (_foldRanges.any((fold) => fold.isFolded && i > fold.startIndex && i <= fold.endIndex)) {
+        continue;
+      }
+      
+      final line = displayLines[i];
+      if (!line.trimRight().endsWith(':')) continue;
+      
+      final indent = line.length - line.trimLeft().length;
+      final indentLevel = indent ~/ tabSize;
+      
+      int endLine = i + 1;
+      while (endLine < displayLines.length) {
+        final nextLine = displayLines[endLine];
+        if (nextLine.trim().isEmpty) {
+          endLine++;
+          continue;
+        }
+        final nextIndent = nextLine.length - nextLine.trimLeft().length;
+        if (nextIndent <= indent) break;
+        endLine++;
+      }
+      
+      if (endLine <= i + 1) continue;
+      if (i + 1 >= _lineTops.length || endLine - 1 >= _lineTops.length || endLine - 1 >= _lineHeights.length) continue;
+      
+      blocks.add((startLine: i, endLine: endLine, indentLevel: indentLevel));
+    }
+    
+    int? selectedBlockIndex;
+    int minBlockSize = 999999;
+    
+    for (int idx = 0; idx < blocks.length; idx++) {
+      final block = blocks[idx];
+      if (currentLine >= block.startLine && currentLine < block.endLine) {
+        final blockSize = block.endLine - block.startLine;
+        if (blockSize < minBlockSize) {
+          minBlockSize = blockSize;
+          selectedBlockIndex = idx;
+        }
+      }
+    }
+    
+    for (int idx = 0; idx < blocks.length; idx++) {
+      final block = blocks[idx];
+      final isSelected = selectedBlockIndex == idx;
+      
+      final Paint guidePaint = Paint()
+        ..color = isSelected
+            ? (_editorTheme['root']?.color ?? Colors.grey)
+            : (_editorTheme['root']?.color ?? Colors.grey).withAlpha(100)
+        ..strokeWidth = isSelected ? 0.7 : 0.3
+        ..style = PaintingStyle.stroke;
+      
+      final double yTop = offset.dy
+        + (_innerPadding?.top ?? 0)
+        + _lineTops[block.startLine + 1]
+        - _vscrollController.offset;
+      
+      final double yBottom = offset.dy
+        + (_innerPadding?.top ?? 0)
+        + _lineTops[block.endLine - 1]
+        + _lineHeights[block.endLine - 1]
+        - _vscrollController.offset;
+      
+      if (yBottom < 0 || yTop > viewBottom) continue;
+      
+      final double guideX = offset.dx
+        + _gutterWidth
+        + (_innerPadding?.left ?? 0)
+        + ((block.indentLevel * charWidth) * tabSize)
+        - (_lineWrap ? 0 : _hscrollController.offset);
+      
+      final double clampedYTop = yTop.clamp(0.0, viewBottom);
+      final double clampedYBottom = yBottom.clamp(0.0, viewBottom);
+      
+      if (guideX >= _gutterWidth && guideX <= size.width) {
+        canvas.drawLine(
+          Offset(guideX, clampedYTop),
+          Offset(guideX, clampedYBottom),
+          guidePaint
+        );
+      }
+    }
+  }
+  
+  @override
+  bool hitTestSelf(Offset position) => true;
+
+  int? _dragStartOffset;
+  Timer? _selectionTimer, _hoverTimer;
+  bool _selectionActive = false, _isDragging = false;
+  Offset? _pointerDownPosition;
+
+  @override
+  void handleEvent(PointerEvent event, covariant BoxHitTestEntry entry) {
+    final localPosition = event.localPosition;
+    _currerntPosition = localPosition;
+    final padded = Offset(
+      localPosition.dx
+        - (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+        + _hscrollController.offset
+        - _gutterWidth,
+      localPosition.dy
+        - (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+        + _vscrollController.offset
+    );
+    TextPosition offset = _codeContent?.tp.getPositionForOffset(padded)
+    ?? TextPosition(offset: _controller.selection.extentOffset);
+
+    final globalOffset = _getGlobalPositionFromVisible(offset.offset);
+    if (globalOffset != -1) {
+      offset = TextPosition(offset: globalOffset);
+    }
+
+    if(event is PointerHoverEvent){
+      if(!(_hoverNotifier.value != null && _isHoveringPopup.value)){
+        _hoverNotifier.value = null;
+      }
+      
+      if(
+        (_hoverNotifier.value == null || !_isHoveringPopup.value) &&
+        _isOffsetOverWord(offset.offset)
+        ){
+        _hoverTimer?.cancel();
+        _hoverTimer = Timer(Duration(milliseconds: 1500), (){
+          final lineChar = _offsetToLineChar(offset.offset);
+          _hoverNotifier.value = [event.localPosition, lineChar];
+        });
+      } else {
+        _hoverNotifier.value = null;
+      }
+    }
+
+    void select(){
+      _selectionActive = _selectionNotifier.value = true;
+      final text = _controller.text;
+      final pos = offset.offset;
+      int start = pos, end = pos;
+      while (start > 0 && !_isWordBoundary(text[start - 1])) {
+        start--;
+      }
+      while (end < text.length && !_isWordBoundary(text[end])) {
+        end++;
+      }
+      _controller.selection = TextSelection(baseOffset: start, extentOffset: end);
+    }
+
+    if(
+      event is PointerDownEvent && event.buttons == kSecondaryButton ||
+      event is PointerUpEvent && isMobile && _selectionActive
+    ){
+      _offsetNotifier.value = event.localPosition;   
+    }
+
+    if (event is PointerDownEvent && event.buttons == kPrimaryButton) {
+      if(_offsetNotifier.value.dx > 0 || _offsetNotifier.value.dy > 0){
+        _offsetNotifier.value = Offset(-1, -1);
+      }
+
+      _dragStartOffset = offset.offset;
+      _dtap.addPointer(event);
+      _oneTap.addPointer(event);
+
+
+      if (isMobile) {
+        _dtap.onDoubleTap = (){
+          select();
+          _offsetNotifier.value = event.localPosition;
+        };
+
+        _oneTap.onTap = (){
+          if(_hoverNotifier.value != null) {
+            _hoverNotifier.value = null;
+          } else if(_isOffsetOverWord(offset.offset)) {
+            final lineChar = _offsetToLineChar(offset.offset);
+            _hoverNotifier.value = [localPosition, lineChar];
+          }
+        };
+
+        _draggingCHandle = false;
+        _draggingStartHandle = false;
+        _draggingEndHandle = false;
+        if (_controller.selection.baseOffset != _controller.selection.extentOffset) {
+          if (_startHandleRect?.contains(event.localPosition) ?? false) {
+            _draggingStartHandle = true;
+            _selectionActive = _selectionNotifier.value = true;
+            _pointerDownPosition = event.localPosition;
+            return;
+          }
+          if (_endHandleRect?.contains(event.localPosition) ?? false) {
+            _draggingEndHandle = true;
+            _selectionActive = _selectionNotifier.value = true;
+            _pointerDownPosition = event.localPosition;
+            return;
+          }
+        } else if(_normalHandle?.contains(event.localPosition) ?? false) {
+          _draggingCHandle = true;
+          _draggingStartHandle = _draggingEndHandle = false;
+          _selectionActive = _selectionNotifier.value = true;
+          _controller.selection = TextSelection.collapsed(offset: offset.offset);
+          _pointerDownPosition = event.localPosition;
+          return;
+        }
+
+        _dragStartOffset = offset.offset;
+        _isDragging = false;
+        _pointerDownPosition = event.localPosition;
+        _selectionActive = _selectionNotifier.value = false;
+        _selectionTimer?.cancel();
+        _selectionTimer = Timer(const Duration(milliseconds: 500), select);
+      } else{
+        _controller.selection = TextSelection.collapsed(offset: offset.offset);
+      }
+
+      for (final fold in _foldRanges) {
+        if (fold.startIndex >= _lineTops.length) continue;
+        final isInsideFoldedParent = _foldRanges.any(
+          (parent) => parent.isFolded && 
+                      parent.startIndex < fold.startIndex && 
+                      parent.endIndex >= fold.startIndex
+        );
+        
+        if (isInsideFoldedParent) continue;
+        
+        final iconRect = Rect.fromLTWH(
+          _gutterWidth - (_textStyle?.fontSize ?? 15) + (_innerPadding?.left ?? 0),
+          _lineTops[fold.startIndex] + (_innerPadding?.top ?? 0) - _vscrollController.offset,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+        );
+        
+        if (iconRect.contains(event.localPosition)) {
+          _toggleFold(fold);
+          return;
+        }
+      }
+    } 
+
+    if (event is PointerMoveEvent && _dragStartOffset != null) {
+      if(isMobile) {
+        final pos = _codeContent?.tp.getPositionForOffset(padded) ?? 
+            TextPosition(offset: _controller.selection.extentOffset);
+            
+        if (_draggingCHandle) {
+          _controller.selection = TextSelection.collapsed(offset: pos.offset);
+          markNeedsPaint();
+          return;
+        }
+
+        if (_draggingStartHandle || _draggingEndHandle) {
+          final base = _controller.selection.start;
+          final extent = _controller.selection.end;
+
+           if (_draggingStartHandle) {
+            final moving = pos.offset;
+
+            _controller.selection = TextSelection(
+              baseOffset: moving,
+              extentOffset: extent,
+            );
+
+            if (moving > extent) {
+              _draggingStartHandle = false;
+              _draggingEndHandle = true;
+            }
+          } else {
+            final moving = pos.offset;
+
+            _controller.selection = TextSelection(
+              baseOffset: base,
+              extentOffset: moving,
+            );
+
+            if (moving < base) {
+              _draggingEndHandle = false;
+              _draggingStartHandle = true;
+            }
+          }
+
+          markNeedsPaint();
+          return;
+        }
+
+        if (_dragStartOffset != null) {
+          if (isMobile) {
+            if ((event.localPosition - (_pointerDownPosition ?? event.localPosition)).distance > 10) {
+              _isDragging = true;
+            }
+            if (!_selectionActive) return;
+          }
+
+          _controller.selection = TextSelection(
+            baseOffset: _dragStartOffset!,
+            extentOffset: pos.offset,
+          );
+        }
+
+        if ((event.localPosition - _pointerDownPosition!).distance > 10) {
+          _isDragging = true;
+        }
+        if(!_selectionActive) return;
+      }
+      
+      final offset = _codeContent?.tp.getPositionForOffset(padded)
+        ?? TextPosition(offset: _controller.selection.extentOffset);
+  
+      _controller.selection = TextSelection(
+        baseOffset: _dragStartOffset!,
+        extentOffset: offset.offset,
+      );
+    }
+
+    if (event is PointerUpEvent || event is PointerCancelEvent) {
+      if(!_isDragging && isMobile && !_selectionActive){
+        _controller.selection = TextSelection.collapsed(offset: offset.offset);
+      }
+      _draggingStartHandle = false;
+      _draggingEndHandle = false;
+      _draggingCHandle = false;
+      _pointerDownPosition = null;
+      _dragStartOffset = null;
+      _selectionTimer?.cancel();
+      _selectionActive = _selectionNotifier.value = false;
+      if(_readOnly) return;
+      if(isMobile && !_isDragging){
+        _commonF(_controller);
+      } else if(!isMobile){
+        _controller.refresh();
+      }
+      _isDragging = false;
+    }
+
+    super.handleEvent(event, entry);
+  }
+
+  @override
+  void performLayout() {
+    final maxW = constraints.hasBoundedWidth ? constraints.maxWidth : 1000.0;
+    _lineTops.clear();
+    _lineHeights.clear();
+
+    List<String> displayLines = _buildDisplayLinesWithAI();
+
+    final defaultStyle = _textStyle ?? _editorTheme['root'];
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+
+    double y = 0;
+    double maxLineWidth = 0;
+    
+    for (int i = 0; i < displayLines.length; i++) {
+      bool isFolded = _foldRanges.any(
+        (fold) => 
+          fold.isFolded && i > fold.startIndex && i <= fold.endIndex
+        );
+      
+      if (isFolded) {
+        _lineTops.add(y);
+        _lineHeights.add(0);
+      } else {
+        tp.text = TextSpan(text: displayLines[i], style: defaultStyle);
+        final tpWidth = _lineWrap ? maxW - (_innerPadding?.horizontal ?? 0) - _gutterWidth : double.infinity;
+        tp.layout(maxWidth: tpWidth);
+        maxLineWidth = max(maxLineWidth, tp.width);
+        _lineTops.add(y);
+        _lineHeights.add(tp.height);
+        y += tp.height;
+      }
+    }
+
+    final contentWidth = maxLineWidth + (_innerPadding?.horizontal ?? 0);
+    final contentHeight = y + (_innerPadding?.vertical ?? 0);
+
+    size = constraints.constrain(Size(contentWidth, contentHeight));
+  }
+  
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    int? bracket1, bracket2;
+    final selection = _controller.selection;
+    final cursorPosition = selection.extentOffset;
+    String text = _lines.join('\n');
+    String controllerText = _controller.text;
+
+    if (cursorPosition >= 0 && cursorPosition <= text.length) {
+      final String? before = cursorPosition > 0
+          ? text[cursorPosition - 1]
+          : null;
+      final String? after = cursorPosition < text.length
+          ? text[cursorPosition]
+          : null;
+      final int? pos = (before != null && '{}[]()'.contains(before))
+          ? cursorPosition - 1
+          : (after != null && '{}[]()'.contains(after))
+          ? cursorPosition
+          : null;
+
+      if (pos != null) {
+        final match = _findMatchingBracket(text, pos);
+        if (match != null) {
+          bracket1 = pos;
+          bracket2 = match;
+        }
+      }
+    }
+
+    final canvas = context.canvas;
+    canvas.save();
+    canvas.drawPaint(
+      Paint()
+        ..color = _editorTheme['root']!.backgroundColor ?? Colors.transparent
+        ..style = PaintingStyle.fill
+    );
+    final defaultStyle = _textStyle ?? editorTheme['root'];
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+    final gutterPainter = TextPainter(textDirection: TextDirection.ltr);
+    final foldIconPainter = TextPainter(textDirection: TextDirection.ltr);
+
+    final unfoldIcon = _gutterStyle.unfoldedIcon; 
+    final foldIcon = _gutterStyle.foldedIcon;
+
+    final viewTop = _vscrollController.offset;
+    final viewBottom = viewTop + _vscrollController.position.viewportDimension;
+  
+    final selectedColor = _selectionStyle.selectionColor;
+  
+    final firstVisibleLine = _findFirstVisibleLine(viewTop);
+    final lastVisibleLine = _findLastVisibleLine(viewBottom);
+
+    List<String> displayLines;
+    if (_inFlightEdits.isNotEmpty) {
+      displayLines = controllerText.split('\n');
+      for (final entry in _inFlightEdits.entries) {
+        if (entry.key < displayLines.length) {
+          displayLines[entry.key] = entry.value;
+        }
+      }
+    } else {
+      displayLines = _buildDisplayLinesWithAI();
+    }
+
+    int aiStart = -1, aiEnd = -1;
+    if (_aiResponse != null && _aiResponse!.isNotEmpty && _controller.selection.isValid) {
+      aiStart = _controller.selection.extentOffset;
+      aiEnd = aiStart + _aiResponse!.length;
+      _controller.isShowingAiSuggestion = true;
+    }
+
+    final Set<int> unmatchedBrackets = _findUnmatchedBrackets(text).where((index) {
+      final char = text[index];
+      return '{}[]()'.contains(char);
+    }).toSet();
+
+    if (displayLines.isNotEmpty && _lineTops.isNotEmpty) {
+      int spanOffset = 0;
+      for (int i = 0; i < displayLines.length; i++) {
+        final displayText = displayLines[i];
+        final lineLength = displayText.length;
+        final lineStart = spanOffset;
+        final lineEnd = spanOffset + lineLength;
+        
+        if (i >= _lineTops.length ||
+            i < firstVisibleLine ||
+            i > lastVisibleLine ||
+            _foldRanges.any(
+              (item)=> item.startIndex < i && item.endIndex >= i && item.isFolded
+            )
+        ) {
+          spanOffset += lineLength + 1;
+          continue;
+        }
+        
+        final contentTop = _lineTops[i];
+
+        late List<InlineSpan> lineSpans;
+
+        if (aiStart >= 0 && aiEnd > aiStart && lineEnd > aiStart && lineStart < aiEnd) {
+          final aiLineStart = max(aiStart, lineStart) - lineStart;
+          final aiLineEnd = min(aiEnd, lineEnd) - lineStart;
+          final beforeAI = displayText.substring(0, aiLineStart);
+          final aiText = displayText.substring(aiLineStart, aiLineEnd);
+          final afterAI = displayText.substring(aiLineEnd);
+
+          final beforeSpans = _convert(
+            highlight.parse(beforeAI, language: _langId).nodes ?? [],
+            lineStart,
+          );
+          final aiSpans = TextSpan(
+            text: aiText,
+            style: defaultStyle?.copyWith(
+              color: Colors.grey[400],
+              fontStyle: FontStyle.italic
+            )
+          );
+          final afterSpans = _convert(
+            highlight.parse(afterAI, language: _langId).nodes ?? [],
+            lineStart + aiLineEnd,
+          );
+
+          lineSpans = [
+            ...beforeSpans,
+            aiSpans,
+            ...afterSpans,
+          ];
+        } else {
+          if (_cachedSpans[i] != null && _cachedSpans[i]!.isNotEmpty && !_inFlightEdits.containsKey(i)) {
+            lineSpans = _cachedSpans[i]!;
+          } else {
+            final nodes = highlight.parse(displayText, language: _langId).nodes ?? [];
+            lineSpans = _convert(nodes, lineStart);
+            if (!_inFlightEdits.containsKey(i)) _cachedSpans[i] = lineSpans;
+          }
+        }
+
+        final Set<int> unmatchedQuotes = _findUnmatchedQuotesInLine(displayText, lineStart);
+        final Set<int> allUnmatched = {...unmatchedBrackets, ...unmatchedQuotes};
+
+        lineSpans = _applyBracketHighlight(
+          lineSpans,
+          lineStart,
+          bracket1,
+          bracket2,
+          allUnmatched
+        );
+
+        lineSpans = _applyDiagnosticsStyling(lineSpans, i, lineStart);
+
+        if (!_inFlightEdits.containsKey(i) && selection.start < lineEnd && selection.end > lineStart) {
+          final selStart = selection.start.clamp(lineStart, lineEnd);
+          final selEnd = selection.end.clamp(lineStart, lineEnd);
+          lineSpans = _applySelectionToSpans(
+            lineSpans,
+            lineStart,
+            selStart,
+            selEnd,
+            selectedColor,
+          );
+        }
+
+        tp.text = TextSpan(
+          style: defaultStyle?.merge(
+            _foldRanges.any((fold) => fold.isFolded && fold.startIndex == i)
+              ? TextStyle(backgroundColor: _editorTheme['root']?.color?.withAlpha(50))
+              : null
+          ),
+          children: [
+            ...lineSpans,
+            if (_foldRanges.any((fold) => fold.isFolded && fold.startIndex == i))
+            TextSpan(text: ' ...', style: defaultStyle),
+          ]
+        );
+        final tpWidth = _lineWrap ? size.width - (_innerPadding?.horizontal ?? 0) : double.infinity;
+        tp.layout(maxWidth: tpWidth);
+        tp.paint(
+          canvas,
+          offset + Offset(
+            (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+              + _gutterWidth - (_lineWrap ? 0 : _hscrollController.offset)
+              ,
+            (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+              + contentTop
+              - _vscrollController.offset,
+          ),
+        );
+
+        spanOffset += lineLength + 1;
+      }
+      
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, _gutterWidth, viewBottom),
+        Paint()
+        ..style = PaintingStyle.fill
+        ..color = _gutterStyle.backgroundColor ??
+          _editorTheme['root']!.backgroundColor ??
+          Colors.transparent
+      );
+
+      if(_enableGutterDivider) {
+        canvas.drawRect(
+          Rect.fromLTWH(_gutterWidth, 0, 0.2, viewBottom),
+          Paint()
+            ..style = PaintingStyle.fill
+            ..color = _editorTheme['root']!.color!
+        );
+      }
+
+      for(int i=0; i<displayLines.length; i++){
+        if (
+          i >= _lineTops.length ||
+          i < firstVisibleLine ||
+          i > lastVisibleLine ||
+          _foldRanges.any(
+            (item)=> item.startIndex < i && item.endIndex >= i && item.isFolded
+          )
+        ) {
+          continue;
+        }
+
+        final contentTop = _lineTops[i];
+        gutterPainter.text = TextSpan(
+          text: (i + 1).toString(),
+          style: _gutterStyle.lineNumberStyle ?? defaultStyle
+        );
+
+        gutterPainter.textAlign = TextAlign.center;
+        gutterPainter.layout();
+        _gutterWidth = max(_gutterWidth, gutterPainter.width);
+
+        gutterPainter.paint(
+          canvas,
+          Offset(
+            offset.dx +  (_gutterWidth - gutterPainter.width) / 2,
+            offset.dy
+              + (_innerPadding?.vertical ?? 0)
+              + contentTop
+              - _vscrollController.offset
+          ),
+        );
+        
+        if(_foldRanges.isNotEmpty && _foldRanges.any((item)=> item.startIndex == i)){
+          final bool isInsideFoldedParent = _foldRanges.any(
+            (parent) => parent.isFolded && parent.startIndex < i && parent.endIndex >= i
+          );
+
+          if (!isInsideFoldedParent) {
+            final currentFolditem = _foldRanges.firstWhere((item) => item.startIndex == i);
+            final icon = currentFolditem.isFolded ? foldIcon : unfoldIcon;
+            foldIconPainter.text = TextSpan(
+              text: String.fromCharCode(icon.codePoint),
+              style: TextStyle(
+                color: (
+                  currentFolditem.isFolded ?
+                    _gutterStyle.foldedIconColor : _gutterStyle.unfoldedIconColor
+                ) ?? _editorTheme['root']?.color,
+                fontSize: (_textStyle?.fontSize ?? 15) + 2,
+                fontFamily: icon.fontFamily,
+                package: icon.fontPackage
+              )
+            );
+            
+            foldIconPainter.layout(maxWidth: _textStyle?.fontSize ?? 15);
+            foldIconPainter.paint(
+              canvas,
+              Offset(
+                _gutterWidth - foldIconPainter.width + (_innerPadding?.left ?? 0),
+                offset.dy + contentTop + (_innerPadding?.top ?? 0) - _vscrollController.offset + 1
+              )
+            );
+          }
+        }
+ 
+      }
+
+      canvas.save();
+      canvas.clipRect(Rect.fromLTWH(_gutterWidth, 0, size.width - _gutterWidth, size.height));
+
+      canvas.restore();
+
+      List<int> lineStarts = [];
+      int p = 0;
+      for (final l in displayLines) {
+        lineStarts.add(p);
+        p += l.length + 1;
+      }
+
+      List<_Pair> pairsToDraw = [];
+      for (final pr in _cachedBracketPairs) {
+        final openInfo = _indexToLineCol(pr.a, lineStarts, displayLines);
+        final closeInfo = _indexToLineCol(pr.b, lineStarts, displayLines);
+        final oLine = openInfo['line']!;
+        final cLine = closeInfo['line']!;
+        if (oLine != cLine && cLine >= firstVisibleLine && oLine <= lastVisibleLine) {
+          pairsToDraw.add(pr);
+        }
+      }
+
+      final double maxLinePainterWidth = _lineWrap ? size.width - (_innerPadding?.horizontal ?? 0) : double.infinity;
+
+      for (final pair in pairsToDraw) {
+        final open = _indexToLineCol(pair.a, lineStarts, displayLines);
+        final close = _indexToLineCol(pair.b, lineStarts, displayLines);
+        final int openLine = open['line']!;
+        final int closeLine = close['line']!;
+        if (openLine == closeLine) continue;
+
+        final bool isSelected = 
+          (bracket1 == pair.a && bracket2 == pair.b) ||
+          (bracket1 == pair.b && bracket2 == pair.a);
+
+        final Paint guidePaint = Paint()
+          ..color = isSelected
+              ? (_editorTheme['root']?.color ?? _textStyle?.color ?? Colors.grey)
+              : (_editorTheme['root']?.color ?? _textStyle?.color ?? Colors.grey).withAlpha(150)
+          ..strokeWidth = isSelected ? 0.7 : 0.3
+          ..style = PaintingStyle.stroke;
+
+        final String openLineText = displayLines[openLine];
+        final int openLeading = RegExp(r'^(\s*)').firstMatch(openLineText)?.group(0)?.length ?? 0;
+        List<InlineSpan> baseSpans;
+        if (_cachedSpans[openLine] != null && _cachedSpans[openLine]!.isNotEmpty) {
+          baseSpans = _cachedSpans[openLine]!;
+        } else {
+          final nodesForLine = highlight.parse(displayLines[openLine], language: _langId).nodes ?? [];
+          baseSpans = _convert(nodesForLine, lineStarts[openLine]);
+          _cachedSpans[openLine] = baseSpans;
+        }
+
+        final tpLine = _getLinePainter(openLine, baseSpans, maxLinePainterWidth, defaultStyle ?? TextStyle());
+
+        final dxLocal = tpLine.getOffsetForCaret(
+          TextPosition(offset: openLeading),
+          Rect.zero
+        ).dx;
+
+        final double guideX = offset.dx
+            + _gutterWidth
+            + (_innerPadding?.left ?? 0)
+            + dxLocal
+            - (_lineWrap ? 0 : _hscrollController.offset);
+
+        final double yTop = offset.dy
+          + (_innerPadding?.top ?? 0) 
+          + _lineTops[openLine + 1]
+          - _vscrollController.offset;
+        final double yBottom = offset.dy
+          + (_innerPadding?.top ?? 0)
+          + _lineTops[closeLine - 1]
+          + _lineHeights[closeLine]
+          - _vscrollController.offset;
+
+        if (guideX < _gutterWidth || guideX > size.width) continue;
+
+        final double fromY = yTop.clamp(0.0, viewBottom);
+        final double toY = yBottom.clamp(0.0, viewBottom);
+
+        if(_enableGuideLines) {
+          canvas.drawLine(
+            Offset(guideX, fromY), Offset(guideX, toY),
+            guidePaint
+          );
+        }
+      }
+
+      _drawIndentationGuidelines(
+        canvas,
+        offset,
+        displayLines,
+        firstVisibleLine,
+        lastVisibleLine,
+        maxLinePainterWidth
+      );
+    }
+  
+    if (_focusNode.hasFocus) {
+      final caretX = (_innerPadding?.left ?? 0)
+        + _gutterWidth
+        + _carretOffset.dx
+        - (_lineWrap ? 0 : _hscrollController.offset);
+      final caretY = (_innerPadding?.top ?? 0)
+        + _carretOffset.dy
+        - _vscrollController.offset;
+
+      if(_showCaret){
+        canvas.drawRect(
+          Rect.fromLTWH(
+            caretX,
+            caretY,
+            1.5,
+            _caretHeight
+          ),
+          _caretPainter,
+        );
+      }
+      
+      if(isMobile){
+        final Paint bubblePainter = Paint()
+        ..color = _selectionStyle.cursorBubbleColor
+        ..style = PaintingStyle.fill;
+
+        if(selection.end > selection.start){
+          final tpFull = TextPainter(
+            text: TextSpan(
+              text: _controller.text,
+              style: _textStyle,
+            ),
+            textDirection: TextDirection.ltr,
+          );
+          tpFull.layout();
+
+          final startCaret = tpFull.getOffsetForCaret(
+            TextPosition(offset: selection.start),
+            Rect.zero,
+          );
+          final endCaret = tpFull.getOffsetForCaret(
+            TextPosition(offset: selection.end),
+            Rect.zero,
+          );
+
+          final startCaretX = (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+            + startCaret.dx
+            + _gutterWidth
+            - (_lineWrap ? 0 : _hscrollController.offset);
+          final startCaretY = (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+            + startCaret.dy
+            - _vscrollController.offset;
+
+          final endCaretX = (_innerPadding?.left ?? _innerPadding?.right ?? 0)
+            + endCaret.dx
+            + _gutterWidth
+            - (_lineWrap ? 0 : _hscrollController.offset);
+          final endCaretY = (_innerPadding?.top ?? _innerPadding?.bottom ?? 0)
+            + endCaret.dy
+            - _vscrollController.offset;
+
+          canvas.drawRect(
+            Rect.fromLTWH(
+              startCaretX,
+              startCaretY,
+              1.5,
+              _caretHeight
+            ),
+            _caretPainter,
+          );
+          
+          _startHandleRect = Rect.fromLTWH(
+              startCaretX - _caretHeight,
+              startCaretY + _caretHeight,
+              _caretHeight,
+              _caretHeight,
+            );
+          
+          _endHandleRect = Rect.fromLTWH(
+              endCaretX,
+              endCaretY + _caretHeight,
+              _caretHeight,
+              _caretHeight,
+            );
+
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              _startHandleRect!,
+              topLeft: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25)
+            ),
+            bubblePainter,
+          );
+
+          canvas.drawRect(
+            Rect.fromLTWH(
+              endCaretX,
+              endCaretY,
+              1.5,
+              _caretHeight,
+            ),
+            _caretPainter,
+          );
+
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              _endHandleRect!,
+              topRight: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25)
+            ),
+            bubblePainter,
+          );
+
+          canvas.restore();
+        } else if(_showBubble) {
+          final handleSize = _caretHeight;
+          final handleCenterX = caretX;
+          final handleCenterY = caretY + _caretHeight;
+        
+          _normalHandle = Rect.fromLTWH(
+            handleCenterX,
+            handleCenterY,
+            handleSize,
+            handleSize,
+          );
+
+          canvas.save();
+          canvas.translate(handleCenterX, handleCenterY);
+          canvas.rotate(pi / 4);
+          canvas.drawRRect(
+            RRect.fromRectAndCorners(
+              Rect.fromCenter(center: Offset(_caretHeight / 2, _caretHeight / 2), width: handleSize, height: handleSize),
+              topRight: Radius.circular(25),
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25),
+            ),
+            bubblePainter,
+          );
+          canvas.restore();
+
+          if (_draggingCHandle) {
+            final caretLineIndex = _controller.selection.base.offset == -1
+                ? 0
+                : _controller.text.substring(0, _controller.selection.base.offset).split('\n').length - 1;
+            final lines = _controller.text.split('\n');
+            final lineText = (caretLineIndex >= 0 && caretLineIndex < lines.length)
+                ? lines[caretLineIndex]
+                : '';
+          
+            final caretInLine = _controller.selection.base.offset -
+                (caretLineIndex > 0 ? lines.take(caretLineIndex).map((l) => l.length + 1).reduce((a, b) => a + b) : 0);
+            final previewStart = caretInLine.clamp(0, lineText.length);
+            final previewEnd = (caretInLine + 10).clamp(0, lineText.length);
+            final previewText = lineText.substring(
+              max(0, previewStart - 10),
+              min(lineText.length, previewEnd),
+            );
+          
+            final zoomPainter = TextPainter(
+              text: TextSpan(
+                children: _convert(highlight.parse(
+                  previewText,
+                  language: _langId
+                ).nodes ?? []),
+                style: (_textStyle ?? _editorTheme['root'])?.copyWith(
+                  fontSize: (_textStyle?.fontSize ?? 14) * 1.5,
+                  backgroundColor: _editorTheme['root']?.backgroundColor ?? Colors.transparent
+                )
+              ),
+              textDirection: TextDirection.ltr,
+            );
+            zoomPainter.layout(maxWidth: size.width * 0.6);
+          
+            final zoomBoxWidth = zoomPainter.width + 16;
+            final zoomBoxHeight = zoomPainter.height + 12;
+            final zoomBoxX = caretX - zoomBoxWidth / 2;
+            final zoomBoxY = caretY - zoomBoxHeight - 18;
+          
+            final rrect = RRect.fromRectAndRadius(
+              Rect.fromLTWH(zoomBoxX, zoomBoxY, zoomBoxWidth, zoomBoxHeight),
+              Radius.circular(12),
+            );
+            
+            canvas.drawRRect(
+              rrect,
+              Paint()
+                ..color = _editorTheme['root']?.backgroundColor ?? Colors.transparent
+                ..style = PaintingStyle.fill
+            );
+
+            canvas.drawRRect(
+              rrect,
+              Paint()
+                ..color = _editorTheme['root']?.color ?? Colors.grey
+                ..style = PaintingStyle.stroke
+            );
+           
+            zoomPainter.paint(
+              canvas,
+              Offset(zoomBoxX + 8, zoomBoxY + 6),
+            );
+          }
+        }
+      }
+    }
+    canvas.restore();
+  }
+  
+  @override
+  void describeSemanticsConfiguration(SemanticsConfiguration config) {
+    super.describeSemanticsConfiguration(config);
+  }
+
+  void _ensureCaretVisible() {
+    final caretX = _carretOffset.dx + _gutterWidth + (_innerPadding?.horizontal ?? 0);
+    final caretY = _carretOffset.dy + (_innerPadding?.vertical ?? 0);
+    final vScrollOffset = _vscrollController.offset;
+    final hScrollOffset = _hscrollController.offset;
+    final viewportHeight = _vscrollController.position.viewportDimension;
+    final viewportWidth = _hscrollController.position.viewportDimension;
+
+    if (caretY > 0 && caretY <= vScrollOffset + (_innerPadding?.vertical ?? 0)) {
+      _vscrollController.animateTo(
+        caretY - (_innerPadding?.vertical ?? 0),
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    } else if (caretY + _caretHeight >= vScrollOffset + viewportHeight) {
+      _vscrollController.animateTo(
+        caretY + _caretHeight - viewportHeight + (_innerPadding?.vertical ?? 0),
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    }
+
+    if (caretX < hScrollOffset + (_innerPadding?.horizontal ?? 0) + _gutterWidth) {
+      _hscrollController.animateTo(
+        caretX - (_innerPadding?.horizontal ?? 0) - _gutterWidth,
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    } else if (caretX + 1.5 > hScrollOffset + viewportWidth) {
+      _hscrollController.animateTo(
+        caretX + 1.5 - viewportWidth + (_innerPadding?.horizontal ?? 0) + _gutterWidth,
+        duration: Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+  
+  @override
+  MouseCursor get cursor {
+    final localPosition = _currerntPosition;
+    if (localPosition.dx >= 0 && localPosition.dx < _gutterWidth) {
+      for(final fold in _foldRanges){
+        final iconRect = Rect.fromLTWH(
+          _gutterWidth - (_textStyle?.fontSize ?? 15) + (_innerPadding?.left ?? 0),
+          _lineTops[fold.startIndex] + (_innerPadding?.top ?? 0) - _vscrollController.offset,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+          (_textStyle?.fontSize ?? 15) + 3.5,
+        );
+        if(iconRect.contains(_currerntPosition)){
+          return SystemMouseCursors.click;
+        }
+      }
+      return MouseCursor.defer;
+    }
+    return SystemMouseCursors.text;
+  }
+  
+  @override
+  PointerEnterEventListener? get onEnter => (event){};
+  
+  @override
+  PointerExitEventListener? get onExit => (event){};
+  
+  @override
+  bool get validForMouseTracker => true;
+}
+
+class _BackspaceNotifier extends ChangeNotifier {
+  int? _lineIndex;
+  String _lineText = '';
+  int? _caretInLine;
+  Offset? _caretOffset;
+
+  void setEdit({required int lineIndex, required String lineText, required int caretInLine, Offset? caretOffset}) {
+    _lineIndex = lineIndex;
+    _lineText = lineText;
+    _caretInLine = caretInLine;
+    _caretOffset = caretOffset;
+    
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(const Duration(milliseconds: 16), () {
+      notifyListeners();
+    });
+  }
+
+  void clear() {
+    _lineIndex = null;
+    _lineText = '';
+    _caretInLine = null;
+    _caretOffset = null;
+    _debounceTimer?.cancel();
+    notifyListeners();
+  }
+
+  Timer? _debounceTimer;
+
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    super.dispose();
+  }
+
+  int? get lineIndex => _lineIndex;
+  String get lineText => _lineText;
+  int? get caretInLine => _caretInLine;
+  Offset? get caretOffset => _caretOffset;
+}
+
+class _Pair { final int a, b; _Pair(this.a, this.b); }
+
+class FoldRange {
+  final int startIndex, endIndex;
+  bool isFolded = false;
+  List<FoldRange> originallyFoldedChildren = [];
+
+  FoldRange(this.startIndex, this.endIndex);
+  
+  void addOriginallyFoldedChild(FoldRange child) {
+    if (!originallyFoldedChildren.contains(child)) {
+      originallyFoldedChildren.add(child);
+    }
+  }
+  
+  void clearOriginallyFoldedChildren() {
+    originallyFoldedChildren.clear();
+  }
+  
+  bool containsLine(int line) {
+    return line > startIndex && line <= endIndex;
+  }
+}
+""";

@@ -1,0 +1,78 @@
+name: bewy
+description: "A modern IDE built with Flutter"
+publish_to: 'none'
+version: 0.0.2+2
+
+environment:
+  sdk: ^3.7.2
+ 
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  window_manager: ^0.4.3
+  flutter_riverpod: ^2.6.1
+  multi_split_view: ^3.1.0
+  code_forge:
+    path: third_party/code_forge
+  re_highlight: ^0.0.3
+  file_picker: ^8.0.0
+  desktop_drop: ^0.4.4
+  material_design_icons_flutter: ^7.0.7296
+  font_awesome_flutter: ^10.8.0
+  phosphor_flutter: ^2.1.0
+  charset: ^2.0.1
+  dart_style: ^3.1.1
+  desktop_multi_window: ^0.3.0
+  url_launcher: ^6.3.2
+  xml: ^6.5.0
+  xterm: ^4.0.0
+  flutter_pty: ^0.4.2
+  ffi: ^2.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  msix: ^3.16.13
+
+msix_config:
+  display_name: Bewy_editor
+  publisher_display_name: 窦天阳
+  identity_name: 5EACF108.Bewyeditor
+  msix_version: 0.0.2.0
+  logo_path: C:\Users\nnnne\test\bewy\assets\icons\logo.png
+  capabilities: internetClient
+  publisher: CN=D7C8FEF8-150B-4CB7-B6E0-794F4E89BD98
+  store: true
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/icons/
+    - assets/icons/activity/
+    - assets/icons/file_types/
+
+  fonts:
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-Regular.ttf
+        - asset: assets/fonts/JetBrainsMono-Bold.ttf
+          weight: 700
+    - family: CascadiaCode
+      fonts:
+        - asset: assets/fonts/CascadiaCode.ttf
+    - family: CascadiaMono
+      fonts:
+        - asset: assets/fonts/CascadiaMono.ttf
+    - family: SourceCodePro
+      fonts:
+        - asset: assets/fonts/SourceCodePro-Regular.ttf
+    - family: NotoSansSC
+      fonts:
+        - asset: assets/fonts/NotoSansSC-VF.ttf
