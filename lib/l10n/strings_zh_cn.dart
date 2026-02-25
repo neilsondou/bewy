@@ -410,6 +410,7 @@ const Map<String, String> stringsZhCn = {
   'status.signatureHelpUnavailable': '光标位置没有参数提示',
   'status.workspaceSearchFolderRequired': '请先打开文件夹再使用全局搜索。',
   'status.diffMaxEditorsReached': '最多支持 3 个并排编辑器。',
+  'status.scanWorkspace': '全量扫描',
   'explorer.title': '资源管理器',
   'explorer.hideSidebar': '隐藏侧边栏',
   'explorer.openFolderToStart': '打开文件夹以开始',

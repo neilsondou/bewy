@@ -448,6 +448,7 @@ const Map<String, String> stringsEnUs = {
   'status.workspaceSearchFolderRequired':
       'Open a folder first to search.',
   'status.diffMaxEditorsReached': 'Up to 3 side-by-side editors are supported.',
+  'status.scanWorkspace': 'Full Scan',
   'explorer.title': 'EXPLORER',
   'explorer.hideSidebar': 'Hide Sidebar',
   'explorer.openFolderToStart': 'Open a folder to start',

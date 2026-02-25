@@ -1,284 +1,335 @@
-﻿# Bewy IDE VS Code 功能对齐清单
+# Bewy Roadmap
 
-大文件，缩进参考线，加载，守护进程
-全局搜索替换 统计代码量，进程管理器
-折叠按钮，文件浏览器自动排序
-，日志，时间线
+> **Bewy** -- A modern, lightweight code editor built with Flutter.
+>
+> `[x]` Done &nbsp;&nbsp; `[ ]` To-do &nbsp;&nbsp; `[~]` Partial
 
-语言服务器卡顿
+---
 
-颜色主题，图标主题
-项目管理
-内存释放
-终端
-minimap
-全局测试
-编辑器内嵌诊断外观
+## 1. Editor Core
 
+| Status | Feature |
+|:------:|---------|
+| [x] | Multi-tab editing (open / close / switch / drag-reorder) |
+| [x] | Pin / unpin tabs |
+| [x] | Up to 3 editor groups (split view) |
+| [x] | Move tabs between editor groups |
+| [x] | Welcome page (recent files, folders, quick actions) |
+| [x] | Undo / Redo with full history |
+| [x] | Cut / Copy / Paste / Select All |
+| [x] | Duplicate line up / down |
+| [x] | Word wrap toggle |
+| [x] | Auto-pair brackets & quotes (configurable) |
+| [x] | Trim trailing whitespace on save |
+| [x] | Configurable indent (spaces / tabs, size) |
+| [x] | Line numbers |
+| [x] | Current line highlight |
+| [x] | Bracket matching highlight |
+| [x] | Indent guides |
+| [x] | Minimap with diagnostics markers & viewport slider |
+| [x] | Breadcrumb navigation (path + directory dropdown) |
+| [x] | Large file support (>10 000 lines, performance optimized) |
+| [x] | Binary file detection (read-only prompt) |
+| [x] | Font zoom (Ctrl +/-, Ctrl 0 reset, 8-40 pt) |
+| [x] | Letter spacing adjustment (-1.0 ~ 6.0) |
+| [x] | 4 monospace fonts (JetBrains Mono, Cascadia Code/Mono, Source Code Pro) |
+| [x] | Zen mode (hide all panels, focus editing) |
+| [ ] | Multi-cursor editing (Ctrl+D, Alt+Click) |
+| [ ] | Column selection (Alt+Shift+Drag) |
+| [ ] | Code folding (fold / unfold regions) |
+| [ ] | Snippets (tab-completion templates) |
+| [ ] | Rainbow bracket colorization |
+| [ ] | Ruler lines (column guides) |
+| [ ] | Sticky scroll (pin function headers) |
 
+---
 
-代码折叠、lsp继承、予以标记、诊断、撤销
+## 2. Find & Replace
 
-首先，当编辑器只有一个的时候，要恢复全屏，然后查看更改前的文件，打开的新编辑器也要高亮，看看还有没有类似问题，加入功能，第一个是文件浏览器中，按照字母和数字顺序默认排序从上到下，然后就是加入一个日志功能，记录的尽可能详细，关于软件中所有的运行，然后按时间自动保存，按钮就在软件的最下面状态栏的右下角，这个按钮常驻，点击弹出弹窗，里面只显示软件运行的日志，还有个按钮点击打开日志文件保存的位置，然后再设置关于中，检查更新的组件太宽了，按钮和文本不要有那么大的距离，上面可以和标题logo作者那部分隔出一点空
+| Status | Feature |
+|:------:|---------|
+| [x] | In-file find (Ctrl+F) |
+| [x] | In-file replace (Ctrl+H) |
+| [x] | Case-sensitive matching |
+| [x] | Whole-word matching |
+| [x] | Regex patterns |
+| [x] | Replace single / replace all |
+| [x] | Match counter |
+| [x] | Workspace-wide search (cross-file) |
+| [x] | Workspace-wide replace |
+| [x] | Search result preview (file:line:col + context) |
+| [x] | Search progress tracking |
+| [x] | Click-to-navigate from results |
+| [ ] | File include / exclude glob filter |
+| [ ] | Search history |
 
-> 目标：功能层面尽可能完整对齐 VS Code（桌面端主流工作流）。
-> 
-> 状态说明：`[x]` 已完成，`[ ]` 待完成。
+---
 
-## A. 应用外壳与工作台（Workbench）
+## 3. Syntax & Diagnostics
 
-### A1. 窗口与布局系统
-- [x] 自定义标题栏与窗口控制按钮。
-- [x] 顶部菜单栏（File/Edit/Selection/View/Go/Help）基础结构。
-- [x] 可折叠侧边栏（Primary Sidebar）。
-- [x] 可折叠底部面板（Panel）。
-- [x] 多窗口管理（MVP：新建子窗口、关闭全部子窗口、主/子窗口标签拖出迁移）。
-- [x] Zen Mode（全屏沉浸 + 右上角退出按钮 + View/设置入口）。
+### 3.1 Syntax Highlighting
 
-### A2. 视图容器与视图管理
-- [x] Explorer 视图基础。
-- [x] Explorer 底部时间线面板（固定高度、可上拉展开、滚动查看）。
-- [ ] Source Control 视图完整实现。
-- [ ] Run and Debug 视图完整实现。
+| Status | Feature |
+|:------:|---------|
+| [x] | re_highlight-based syntax coloring |
+| [x] | LSP semantic highlighting (token-based) |
+| [ ] | Custom syntax / TextMate grammars |
 
-### A3. 快速入口
-- [x] 顶部导航栏中置实时搜索框（按当前打开文件夹即时搜索）。
-- [x] 顶部搜索下拉固定高度滚动列表（最近打开文件，最多 100 项）。
+### 3.2 Tree-sitter
 
+| Status | Feature |
+|:------:|---------|
+| [x] | Native FFI bindings |
+| [x] | Syntax error detection |
+| [x] | Standalone diagnostics engine |
+| [x] | Automatic full workspace scan |
 
-## B. 文件系统与工作区（Explorer & Workspace）
+### 3.3 LSP (Language Server Protocol)
 
-### B1. 文件资源管理
-- [x] 文件树浏览、展开/折叠。
-- [x] 文件树默认自然排序（字母/数字从上到下，目录优先）。
-- [x] 新建/重命名/删除/复制路径。
-- [x] 拖拽移动、粘贴冲突覆盖确认。
-- [x] 文件系统监听与外部修改同步。
-- [x] 最近文件记录与持久化。
+| Status | Feature |
+|:------:|---------|
+| [x] | 28 languages supported |
+| [x] | Real-time diagnostics (error / warning / info) |
+| [x] | Quick Fix code actions (Ctrl+Shift+.) |
+| [x] | Signature help (Ctrl+Shift+I) |
+| [x] | Per-language LSP toggle |
+| [x] | LSP server install management UI |
+| [x] | Primary LSP pre-launch |
+| [x] | Manual full-scan button in status bar |
+| [x] | Scan exclude rules (directories / file patterns) |
+| [x] | LSP connections panel |
+| [ ] | Go to Definition |
+| [ ] | Find References |
+| [ ] | Hover Documentation |
+| [ ] | Autocomplete (IntelliSense) |
+| [ ] | Rename Symbol |
+| [ ] | Document Symbols / Outline view |
+| [ ] | Workspace Symbol Search |
+| [ ] | Code Lens |
+| [ ] | Inlay Hints |
+| [ ] | Call Hierarchy |
+| [ ] | Type Hierarchy |
 
+---
 
-### B2. 文件模型与可靠性
-- [x] 未保存标记与关闭前保存确认。
-- [x] 保存/另存为/自动保存。
-- [x] 静默 Hot Exit（异常退出后自动恢复未保存内容）。
-- [x] 二进制文件识别与降级展示。
-- [x] 大文件保护策略（只读提示、禁用高开销特性）。
+## 4. Code Formatting
 
-## C. 编辑器核心（Editor）
+| Status | Feature |
+|:------:|---------|
+| [x] | Built-in Dart formatter (dart_style) |
+| [x] | Built-in XML / SVG formatter |
+| [x] | External CLI formatters (Prettier, Black, gofmt, rustfmt, clang-format, ...) |
+| [x] | Format on save (optional) |
+| [x] | Format result status notification |
+| [ ] | Config file support (.prettierrc, .editorconfig, ...) |
 
-### C1. 基础编辑体验
-- [x] 语法高亮。
-- [x] 行号、当前行高亮、缩进参考线。
-- [x] 自动补全括号/引号、自动缩进。
-- [x] 查找/替换（编辑器内）。
-- [x] 跳转到行。
-- [x] 代码折叠。
-- [x] Minimap（含渲染优化）。
-- [x] 三击整行选择。
+---
 
-### C2. 标签页与编辑组
-- [x] 标签页切换/关闭/固定。
-- [x] 编辑组在仅剩一个时自动恢复全宽显示。
+## 5. File Management
 
+### 5.1 File Explorer
 
-### C3. 高级编辑器能力
-- [x] 编辑器内核迁移至 CodeForge（兼容层接入，保留现有工作台交互）。
-- [x] Diff Editor（MVP：并排最多 3 编辑器、支持左右视图交换与标签跨编辑器拖拽）。
-- [x] 时间线改动对比（点击时间线记录打开“当前 vs 更改前”双编辑器并高亮差异行）。
+| Status | Feature |
+|:------:|---------|
+| [x] | Tree-view directory structure |
+| [x] | Expand / collapse directories |
+| [x] | File type icons (multiple themes) |
+| [x] | New file / folder |
+| [x] | Delete with confirmation |
+| [x] | Rename in-place |
+| [x] | Copy / Cut / Paste |
+| [x] | Context menu (right-click) |
+| [x] | Drag-and-drop to open files |
+| [x] | Reveal in system file explorer |
+| [x] | File search filter |
+| [x] | External change detection & auto-reload |
+| [ ] | Git status coloring (modified / added / deleted) |
+| [ ] | Drag to move files between directories |
 
-## D. 全局搜索与导航（Search & Navigation）
+### 5.2 Encoding & Line Endings
 
-### D1. 跨文件搜索
-- [x] 全局搜索（`Ctrl+Shift+F`）。
-- [x] 全局替换（带确认与预览）。
+| Status | Feature |
+|:------:|---------|
+| [x] | 19 character encodings |
+| [x] | Reopen with encoding |
+| [x] | Save with encoding |
+| [x] | Line ending toggle (LF / CRLF) |
 
-### D2. 代码导航
-- [ ] 跳转到定义（F12）。
-- [ ] 跳转到声明/类型定义/实现。
-- [ ] 查找所有引用。
-- [ ] 文档符号（`Ctrl+Shift+O`）。
-- [ ] 工作区符号（`Ctrl+T`）。
-- [ ] Peek Definition / Peek References。
-- [ ] 面包屑导航与符号路径联动。
+### 5.3 Recent Files
 
-## E. 终端与任务（Terminal & Tasks）
+| Status | Feature |
+|:------:|---------|
+| [x] | Recent files list (up to 100) |
+| [x] | Recent folders list |
+| [x] | Reopen last folder on startup (optional) |
 
-### E1. 集成终端
-- [x] 真实系统终端接入（PTY + xterm：PowerShell/CMD/Git Bash/WSL 分发版检测与启动）。
-- [x] 多终端会话与命名（右侧列表管理：新建/关闭/排序）。
-- [ ] 终端分屏（Split Terminal）。
-- [x] 终端配置（默认环境、字体大小、字间距、行高）。
-- [x] 终端右键上下文菜单（复制输出、清除输出、重启会话）。
-- [x] 一键运行文件（Tab 标签页内运行按钮，26 种语言命令映射，PTY 全终端输出）。
-- [x] 终端 Profile 验证（PowerShell Core(pwsh)仅限、Git Bash 路径空格引号修复、WSL 直连）。
-- [ ] 终端链接识别与点击打开。
-- [ ] 终端恢复与持久化（可选）。
+---
 
-### E2. 任务系统
-- [ ] `tasks.json` 等价模型。
-- [ ] Shell/Process 任务。
-- [ ] 默认构建任务与快速运行任务。
-- [ ] 任务问题匹配器（Problem Matchers）。
-- [ ] 任务与调试前置联动（preLaunchTask）。
+## 6. Terminal
 
-## F. 源码管理（Source Control / Git）
+| Status | Feature |
+|:------:|---------|
+| [x] | xterm-based rendering |
+| [x] | Multiple sessions |
+| [x] | Create / close / switch sessions |
+| [x] | Shell profile detection (CMD, PowerShell, bash, ...) |
+| [x] | Terminal font size / spacing / line height config |
+| [x] | Context menu |
+| [x] | Shutdown WSL on close option |
+| [ ] | Split terminal |
+| [ ] | Clickable link detection |
+| [ ] | Send selected text to terminal |
 
-### F1. Git 基础能力
-- [ ] 文件树与编辑器中的 Git 状态装饰（A/M/D/U 等）。
-- [ ] Source Control 面板（变更列表、暂存区）。
-- [ ] 暂存/取消暂存、全部暂存。
-- [ ] Commit（含模板、空提交策略）。
-- [ ] 文件级/块级/行级 Stage。
-- [ ] 丢弃更改（文件/块/行）。
+---
 
-### F2. Git 进阶能力
-- [ ] 分支切换/创建/删除。
-- [ ] Pull/Fetch/Push/Sync。
-- [ ] Rebase / Cherry-pick / Merge 基础流。
-- [ ] 冲突可视化与冲突解决辅助。
-- [ ] Git 历史与提交详情查看。
-- [ ] 与 Diff Editor 深度联动。
+## 7. Bottom Panel
 
-## G. 语言智能（Language Features）
+| Status | Feature |
+|:------:|---------|
+| [x] | Problems panel (group by file, severity filter, click-to-jump) |
+| [x] | Terminal panel |
+| [~] | Output panel (placeholder, pending stream integration) |
+| [ ] | Debug console |
+| [ ] | Source control panel (Git changes) |
 
-### G1. LSP 能力对齐
-- [x] CodeForge LSP 基础接入（Dart：语义标记、Diagnostics、折叠、撤销链路）。
-- [ ] Completion（触发字符、文档片段、排序打分）。
-- [ ] Hover（类型与文档）。
-- [ ] Signature Help。
-- [x] Diagnostics（实时错误/警告）。
-- [x] 问题面板与诊断联动增强（启动即工作区扫描、文件树/标签页错误徽标、状态栏语言级 LSP 连接面板）。
-- [x] 工作区诊断进度可视化（状态栏问题按钮右侧进度条，扫描/增量刷新时显示）。
-- [x] 同语言 LSP 进程复用（按“工作区 + 语言”单实例共享，避免多文件重复拉起同类语言服务器）。
-- [x] 诊断引擎切换（语言服务器 / 简单语法检查），支持切换后工作区重扫并动态更新问题列表。
-- [x] 校对模式切换互斥（切换期间禁止再次切换，待当前扫描完成后恢复），并在扫描完成后刷新文件树/问题列表状态。
-- [x] 编辑器内诊断可视化（简单语法/LSP 共用下划线、悬停提示、小型诊断滚动条三色位置标记）。
-- [x] 编辑器内诊断悬停增强（简单语法检查模式下也显示诊断详情弹窗，支持诊断区域悬停触发）。
-- [x] 工作区诊断增量优化（打开文件时不重复触发单文件扫描，仅在编辑时刷新，避免抖动）。
-- [x] 简单语法检查规则增强（括号/引号/语句不完整/缩进等轻量启发式检查）。
-- [x] tree-sitter 集成替代简单语法检查（29 种语言 AST 级语法错误检测，FFI 原生 DLL）。
-- [ ] Code Action（Quick Fix/Refactor/Source Action）。
-- [ ] Rename Symbol。
-- [ ] Document Formatting（已支持全文件格式化，待补 Range Formatting）。
+---
 
-### G2. 常用语言优先支持
-- [x] TypeScript/JavaScript。
-- [x] Python。
-- [x] Dart。
-- [x] JSON/JSONC/YAML。
-- [x] Markdown。
-- [x] C/C++（基础 LSP 级别）。
+## 8. Status Bar
 
-## H. 调试（Run & Debug）
+| Status | Feature |
+|:------:|---------|
+| [x] | Line : Column position |
+| [x] | Selection character / line count |
+| [x] | Indent mode toggle (spaces / tabs + size) |
+| [x] | Line ending display |
+| [x] | Encoding selector |
+| [x] | Language display |
+| [x] | Word wrap toggle |
+| [x] | Status notifications (success / error / info, auto-dismiss) |
+| [x] | Sidebar / Editor / Panel toggle buttons |
+| [x] | LSP connections button & panel |
+| [x] | LSP full-scan button |
+| [x] | Workspace scan progress bar |
+| [x] | Check-for-updates button |
+| [x] | Runtime logs button |
 
-### H1. 调试主流程
-- [ ] `launch.json` 等价模型。
-- [ ] 断点（普通/条件/命中计数/日志点）。
-- [ ] 启动与附加（Launch/Attach）。
-- [ ] 变量、监视、调用栈、断点面板。
-- [ ] 调试控制台。
-- [ ] 单步调试（Step In/Out/Over、Continue）。
+---
 
-### H2. 调试扩展性
-- [ ] Debug Adapter Protocol（DAP）适配层。
-- [ ] 多调试会话并行。
-- [ ] 任务联动（pre/post debug task）。
+## 9. Title Bar & Menus
 
-## I. 设置体系与个性化（Settings & Personalization）
+| Status | Feature |
+|:------:|---------|
+| [x] | Custom title bar (minimize / maximize / close) |
+| [x] | Menu bar (File, Edit, Selection, View, Settings) |
+| [x] | Global file search (fuzzy match, 120 ms debounce) |
+| [x] | Go to Line (Ctrl+G) |
+| [x] | Go to File (Ctrl+P) |
 
-### I1. 设置模型
-- [x] 图形化设置页（编辑器/快捷键/外观/关于）。
-- [x] 快捷键可视化编辑。
-- [x] 快捷键配置管理（恢复默认、导出配置、读取配置）。
-- [x] 中英文切换与持久化。
-- [x] 设置新增“开源软件”独立页面（从关于页拆分）。
-- [x] 检查更新并入“关于”页面（dou.asia 通道，紧凑状态 + 按钮）。
-- [x] 设置新增“隐私声明”页面（中英文双语，关于页入口按钮）。
-- [x] 首次启动隐私同意弹窗（同意后持久化，不同意即退出）。
-- [x] 设置项顺序微调（默认文件编码前置、启动恢复跟随其后、外观中 Zen Mode 置底），并将隐私声明入口收敛到“关于”页内小字弹窗。
-- [x] 代码统计独立页面（语言构成饼图 + 扩展名筛选 + 总行数统计）。
-- [x] 关于页改为“居中简版信息（Logo/标题/作者 + 紧凑更新状态）”布局。
-- [x] 开源列表从关于页拆分，单独在设置中可滚动查看。
-- [x] LSP 改为常驻启用（默认全语言按需拉起），设置页移除 LSP 开关类配置，新增“语言服务器”安装/检测面板与顶部设置导航入口，并保留 CodeForge 快捷键接管开关。
-- [ ] 用户设置 / 工作区设置 / 文件夹设置三级覆盖。
-- [ ] 设置搜索（按键名/描述/标签）。
-- [ ] 设置导入导出。
-- [ ] 设置同步（跨设备，后期可接云端）。
+---
 
-### I2. 主题与外观
-- [x] 文件图标主题切换与配色切换。
-- [x] 设置中支持暗色/亮色模式切换（默认暗色，持久化生效）。
-- [x] 主题切换即时全局生效（无需通过点击标签页触发局部刷新）。
-- [x] 亮色主题已调低整体亮度，减少刺眼感并保持层级对比。
-- [x] 新增扩展颜色主题（深蓝/浅蓝/深紫/浅紫），并基于统一主题令牌联动全组件。
-- [ ] Color Theme 完整主题系统（亮色/暗色/高对比）。
-- [ ] Product Icon Theme。
-- [ ] 自定义颜色令牌（workbench/editor token）。
-- [ ] 字体回退策略与 CJK 渲染优化项。
+## 10. Keyboard Shortcuts
 
-## J. 扩展系统（Extensions）
+| Status | Feature |
+|:------:|---------|
+| [x] | 31 customizable shortcuts |
+| [x] | Conflict detection |
+| [x] | Export / Import config |
+| [x] | Restore defaults |
+| [x] | Shortcuts settings UI |
 
-### J1. 扩展基础设施
-- [ ] 扩展清单模型（manifest）。
-- [ ] 扩展生命周期（安装/启用/禁用/卸载）。
-- [ ] 扩展 API 边界（命令、视图、语言、主题、任务、调试）。
-- [ ] 扩展隔离与沙箱策略。
-- [ ] 版本兼容与 API 稳定策略。
+---
 
-### J2. 扩展分发生态
-- [ ] 本地 VSIX 等价安装。
-- [ ] 在线扩展市场（搜索、评分、版本、依赖）。
-- [ ] 扩展签名与安全校验。
+## 11. Themes & Appearance
 
-## K. 远程开发与协作（Remote & Collaboration）
+| Status | Feature |
+|:------:|---------|
+| [x] | 6 color themes (Dark, Light, Dark Blue, Light Blue, Dark Purple, Light Purple) |
+| [x] | 60+ color tokens (editor, UI, terminal, syntax, panels, ...) |
+| [x] | Glassmorphism effects |
+| [x] | 5 file icon themes (Classic, Material, Cupertino, Font Awesome, Phosphor) |
+| [x] | 3 icon color schemes (Muted, Vivid, Monochrome) |
+| [x] | UI font selection (Segoe UI, Noto Sans SC, Cascadia Code) |
+| [ ] | Custom theme import |
+| [ ] | Follow system dark / light mode |
 
-### K1. 远程开发
-- [ ] SSH 远程工作区。
-- [ ] 容器开发（Dev Container）基础。
-- [ ] WSL（Windows 场景）支持。
-- [ ] 端口转发与远程终端。
+---
 
-### K2. 协作能力
-- [ ] 实时协作编辑（Live Share 等价，后期）。
-- [ ] 会话邀请、只读共享、跟随光标。
+## 12. Internationalization
 
-## L. 稳定性、性能与质量（Quality）
+| Status | Feature |
+|:------:|---------|
+| [x] | English (en_US) -- full |
+| [x] | Simplified Chinese (zh_CN) -- full |
+| [x] | Dynamic language switch (no restart) |
+| [ ] | More locales (ja, ko, zh_TW, ...) |
 
-### L1. 性能目标
-- [x] 大文件打开降载（>10k 行时降低高开销渲染与分析开销）。
-- [ ] 冷启动、热启动性能基线。
-- [ ] 大文件（>1MB）编辑体验优化。
-- [ ] 大仓库（>100k 文件）索引与搜索策略。
-- [ ] UI 渲染与输入延迟监控。
+---
 
-### L2. 质量保障
-- [x] 已有 provider/widget 测试基础。
-- [x] 运行日志系统（自动落盘、状态栏入口、日志弹窗与日志目录跳转）。
-- [x] 编辑器诊断悬停细节增强（简单语法/LSP统一）与 minimap 诊断标记恢复。
-- [x] 终端稳定性增强（Git Bash/WSL 启动兼容、复制输出按钮、WSL 关闭释放开关）。
-- [ ] 端到端回归测试矩阵（核心用户路径）。
-- [ ] 快照测试（关键页面）。
-- [ ] 崩溃收集与错误分级上报。
-- [ ] 发布前自动化检查门禁（lint/test/build）。
+## 13. Multi-Window
 
-## M. 发布与运维（Release）
+| Status | Feature |
+|:------:|---------|
+| [x] | Main window + child windows |
+| [x] | Tab transfer across windows |
+| [x] | Inter-window IPC |
+| [x] | Child window lifecycle management |
+| [x] | Unified unsaved-file collection on exit |
 
-- [ ] Windows 安装包（MSIX/Inno Setup）与升级策略。
-- [ ] macOS/Linux 发版流程。
-- [ ] 自动更新机制。
-- [ ] 版本迁移与配置兼容策略。
-- [ ] 隐私与遥测开关、许可与合规页。
+---
 
-## N. 与 VS Code 对齐的里程碑
+## 14. Settings & Persistence
 
-### N1. 里程碑 M1（可替代日常轻开发）
-- [ ] 完成：全局搜索/替换、Quick Open、Command Palette、真实终端、Git 基础、问题面板。
+| Status | Feature |
+|:------:|---------|
+| [x] | JSON config file |
+| [x] | Auto-save (off / after delay / on focus lost) |
+| [x] | Hot exit (snapshot on close, restore on restart) |
+| [x] | Window size / position memory |
+| [x] | Settings UI (General, Editor, Terminal, Syntax, Appearance, Shortcuts, ...) |
+| [x] | Code statistics (by language / extension / lines / files, exportable) |
+| [x] | Privacy statement & consent dialog |
+| [x] | Open-source software info |
+| [x] | Check for updates (dou.asia channel) |
 
-### N2. 里程碑 M2（中度项目可用）
-- [ ] 完成：LSP 核心（定义/引用/重命名/格式化）、调试基础、Split/Diff Editor、任务系统。
+---
 
-### N3. 里程碑 M3（生态化）
-- [ ] 完成：扩展系统 MVP、主题系统完整化、工作区三级设置、发布与更新闭环。
+## 15. Timeline
 
-### N4. 里程碑 M4（高度对齐 VS Code）
-- [ ] 完成：远程开发、扩展市场、企业级稳定性与性能指标达标。
+| Status | Feature |
+|:------:|---------|
+| [x] | File operation history (up to 500 events) |
+| [x] | Operation type labels (created / changed / moved / renamed / deleted) |
+| [x] | History comparison view |
+
+---
+
+## 16. Logging
+
+| Status | Feature |
+|:------:|---------|
+| [x] | Structured, leveled logging |
+| [x] | Per-component log categories |
+| [x] | Runtime logs viewer |
+| [x] | Auto-save log files |
+| [x] | Flush logs on exit |
+
+---
+
+## 17. Planned Major Features
+
+| Status | Feature |
+|:------:|---------|
+| [ ] | Git integration (diff, commit, branch, push, pull, blame, log) |
+| [ ] | Debugger integration (DAP protocol, breakpoints, stepping, variables) |
+| [ ] | Code runner (Run / Build button, task configuration) |
+| [ ] | Plugin / extension system |
+| [ ] | Remote development (SSH / WSL / Container) |
+| [ ] | AI-assisted coding (Copilot-style completion / chat) |
+| [ ] | Markdown live preview |
+| [ ] | Image / PDF preview |
+| [ ] | Diff editor (side-by-side compare & edit) |
+| [ ] | Process manager (view / kill child processes) |
+| [ ] | Notification center |
+| [ ] | Command palette (Ctrl+Shift+P) |
+| [ ] | Settings sync (cross-device) |
+| [ ] | .editorconfig support |

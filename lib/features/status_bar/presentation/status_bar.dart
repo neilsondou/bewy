@@ -159,6 +159,10 @@ class StatusBar extends ConsumerWidget {
                       ? () => _showLspConnectionsPanel(context, lspConnections)
                       : null,
             ),
+            if (lspModeEnabled) ...[
+              const SizedBox(width: 2),
+              _ScanWorkspaceButton(scanProgress: scanProgress),
+            ],
             const SizedBox(width: 4),
             _StatusIssueButton(
               icon: Icons.bug_report_outlined,
@@ -860,6 +864,70 @@ class _StatusIssueButtonState extends State<_StatusIssueButton> {
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ScanWorkspaceButton extends ConsumerStatefulWidget {
+  const _ScanWorkspaceButton({required this.scanProgress});
+
+  final WorkspaceDiagnosticsProgress scanProgress;
+
+  @override
+  ConsumerState<_ScanWorkspaceButton> createState() =>
+      _ScanWorkspaceButtonState();
+}
+
+class _ScanWorkspaceButtonState extends ConsumerState<_ScanWorkspaceButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final isScanning = widget.scanProgress.isActive;
+    return Tooltip(
+      message: context.tr('status.scanWorkspace'),
+      waitDuration: const Duration(milliseconds: 500),
+      child: MouseRegion(
+        cursor:
+            isScanning ? SystemMouseCursors.basic : SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: GestureDetector(
+          onTap:
+              isScanning
+                  ? null
+                  : () => ref
+                      .read(editorAreaProvider.notifier)
+                      .runManualWorkspaceScan(),
+          child: Container(
+            width: 22,
+            height: 18,
+            decoration: BoxDecoration(
+              color:
+                  _hover && !isScanning
+                      ? AppColors.listActiveSelectionBackground
+                      : Colors.transparent,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            alignment: Alignment.center,
+            child:
+                isScanning
+                    ? SizedBox(
+                      width: 10,
+                      height: 10,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.5,
+                        color: AppColors.statusBarForeground,
+                      ),
+                    )
+                    : Icon(
+                      Icons.radar_outlined,
+                      size: 13,
+                      color: AppColors.statusBarForeground,
+                    ),
           ),
         ),
       ),

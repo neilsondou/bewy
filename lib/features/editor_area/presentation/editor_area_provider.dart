@@ -960,13 +960,31 @@ class EditorAreaNotifier extends StateNotifier<EditorAreaState> {
       await _startPrimaryLspServers(workspacePath, languages);
     }
 
-    await _runWorkspaceDiagnosticsPass();
+    // Tree-sitter mode: auto full scan; LSP mode: manual only
+    if (!useLsp) {
+      await _runWorkspaceDiagnosticsPass();
+    }
   }
 
   Future<void> restartWorkspaceDiagnosticsForCurrentRoot() async {
     final root = _workspaceDiagnosticsRoot;
     if (root == null || root.isEmpty) return;
     await startWorkspaceDiagnostics(workspacePath: root);
+  }
+
+  Future<void> runManualWorkspaceScan() async {
+    final root = _workspaceDiagnosticsRoot;
+    if (root == null || root.isEmpty) return;
+    AppLogService.instance.info('lsp', 'manualWorkspaceScanTriggered root=$root');
+    // Ensure primary LSP is started
+    final useLsp = await _shouldUseLanguageServerDiagnostics();
+    if (useLsp && _primaryLspControllers.isEmpty) {
+      await _loadExcludeRules();
+      final languages = _detectWorkspaceLanguages(root);
+      _primaryLspLanguages..clear()..addAll(languages);
+      await _startPrimaryLspServers(root, languages);
+    }
+    await _runWorkspaceDiagnosticsPass();
   }
 
   Future<void> refreshDiagnosticsEngineForOpenTabs() async {
